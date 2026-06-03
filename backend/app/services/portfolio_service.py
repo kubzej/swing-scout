@@ -123,7 +123,7 @@ async def get_portfolio_snapshot(user_id: str, redis) -> PortfolioSnapshot:
     fx = await get_fx_rates(redis)
 
     positions: List[PositionSnapshot] = []
-    total_value_czk = 0.0
+    invested_value_czk = 0.0
     total_cost_czk = 0.0
 
     for p in raw_positions:
@@ -142,7 +142,7 @@ async def get_portfolio_snapshot(user_id: str, redis) -> PortfolioSnapshot:
         pnl_czk = current_value_czk - cost_czk
         pnl_pct = round(pnl_czk / cost_czk * 100, 2) if cost_czk > 0 else 0.0
 
-        total_value_czk += current_value_czk
+        invested_value_czk += current_value_czk
         total_cost_czk += cost_czk
 
         # Dynamic sector from yfinance (Redis cached 24h — no extra latency)
@@ -172,15 +172,15 @@ async def get_portfolio_snapshot(user_id: str, redis) -> PortfolioSnapshot:
             sector=sector,
         ))
 
-    total_portfolio_value = total_value_czk + cash_czk
-    total_pnl_czk = total_value_czk - total_cost_czk
+    total_portfolio_value = invested_value_czk + cash_czk
+    total_pnl_czk = invested_value_czk - total_cost_czk
     total_pnl_pct = round(total_pnl_czk / total_cost_czk * 100, 2) if total_cost_czk > 0 else 0.0
     total_return_pct = round((total_portfolio_value - starting_cash) / starting_cash * 100, 2)
 
     sector_exposure = _calc_sector_exposure(positions, total_portfolio_value)
 
     return PortfolioSnapshot(
-        total_value_czk=round(total_value_czk, 2),
+        total_value_czk=round(total_portfolio_value, 2),
         total_cost_czk=round(total_cost_czk, 2),
         total_pnl_czk=round(total_pnl_czk, 2),
         total_pnl_pct=total_pnl_pct,

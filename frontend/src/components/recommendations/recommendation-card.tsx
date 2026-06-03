@@ -23,6 +23,11 @@ const CONFIDENCE_LABELS: Record<number, string> = {
   4: 'Silné',
 };
 
+const SOURCE_LABELS: Record<string, string> = {
+  daily: 'Denní',
+  intraday: 'Intraday',
+};
+
 const GENERIC_FIT_NOTES = ['fit ok', 'ok', 'fits', 'fits ok', 'žádný problém', 'bez omezení'];
 
 function isGenericFitNote(text: string | null): boolean {
@@ -46,6 +51,12 @@ export function RecommendationCard({
   const currency = (opts?.currency as string) || 'USD';
   const priceUsd = (opts?.current_price_usd as number) || null;
   const recommendedShares = (opts?.recommended_shares as number) || null;
+  const sourceType =
+    recommendation.source_run_type ??
+    (recommendation.run_id ? 'daily' : 'intraday');
+  const sourceLabel = sourceType
+    ? SOURCE_LABELS[sourceType] ?? sourceType
+    : null;
 
   const shares =
     recommendedShares ??
@@ -64,6 +75,11 @@ export function RecommendationCard({
           <span className="text-xl font-semibold text-foreground">{recommendation.ticker}</span>
           <ActionBadge action={recommendation.action} />
           <PlayTypeBadge playType={recommendation.play_type} />
+          {sourceLabel ? (
+            <Badge className="border-border/70 bg-background/55 text-muted-foreground">
+              {sourceLabel}
+            </Badge>
+          ) : null}
           <Badge className="gap-1">
             {Array.from({ length: recommendation.confidence }).map((_, i) => (
               <Star key={i} className="h-2.5 w-2.5 fill-current" />

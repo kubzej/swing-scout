@@ -12,6 +12,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _with_source_run_type(rows: list[dict] | None) -> list[dict]:
+    enriched: list[dict] = []
+    for row in rows or []:
+        item = dict(row)
+        item["source_run_type"] = "daily" if item.get("run_id") else "intraday"
+        enriched.append(item)
+    return enriched
+
+
 class ConfirmRequest(BaseModel):
     actual_price: float
     actual_shares: Optional[int] = None
@@ -65,7 +74,7 @@ async def list_recommendations(
         else:
             query = query.in_("status", statuses)
     response = query.execute()
-    return response.data or []
+    return _with_source_run_type(response.data)
 
 
 @router.post("/{rec_id}/confirm")
@@ -250,4 +259,4 @@ async def recommendation_history(
         .limit(limit)
         .execute()
     )
-    return response.data or []
+    return _with_source_run_type(response.data)

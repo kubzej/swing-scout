@@ -6,6 +6,38 @@ interface WatchlistTableProps {
   items: WatchlistItem[];
 }
 
+function WatchReason({ text }: { text: string | null }) {
+  if (!text) {
+    return <span>—</span>;
+  }
+
+  const normalized = text.trim();
+  const needsExpand = normalized.length > 140;
+
+  if (!needsExpand) {
+    return <span className="text-sm leading-6">{normalized}</span>;
+  }
+
+  return (
+    <details className="group">
+      <summary className="cursor-pointer list-none text-sm leading-6 marker:hidden">
+        <span className="group-open:hidden">
+          <span className="line-clamp-2">{normalized}</span>
+        </span>
+        <span className="hidden whitespace-pre-wrap text-foreground/85 group-open:block">
+          {normalized}
+        </span>
+        <span className="mt-1 inline-flex text-xs font-medium text-amber-200/90 group-open:hidden">
+          Zobrazit celý důvod
+        </span>
+        <span className="mt-1 hidden text-xs font-medium text-amber-200/90 group-open:inline-flex">
+          Skrýt
+        </span>
+      </summary>
+    </details>
+  );
+}
+
 export function WatchlistTable({ items }: WatchlistTableProps) {
   return (
     <section className="rounded-[1.5rem] border border-border bg-card/80 shadow-lg shadow-black/10 ring-soft">
@@ -35,9 +67,7 @@ export function WatchlistTable({ items }: WatchlistTableProps) {
                   <StageBadge stage={item.stage} />
                 </td>
                 <td className="px-5 py-4 text-muted-foreground max-w-xs">
-                  <span className="line-clamp-2 text-sm" title={item.signal_reason ?? undefined}>
-                    {item.signal_reason || '—'}
-                  </span>
+                  <WatchReason text={item.signal_reason} />
                 </td>
                 <td className="px-5 py-4 text-muted-foreground">{item.theme || '—'}</td>
                 <td className="px-5 py-4 text-muted-foreground">

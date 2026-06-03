@@ -20,6 +20,7 @@ export interface RecommendationSummary {
   confirmed_at?: string | null;
   rejected_at?: string | null;
   run_id?: string | null;
+  source_run_type?: 'daily' | 'intraday' | null;
 }
 
 export async function fetchRecommendations(params?: {

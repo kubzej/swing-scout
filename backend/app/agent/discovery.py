@@ -46,6 +46,7 @@ Pravidla:
 - Hongkong: číslice.HK (1810.HK, 700.HK, ...)
 - Pokud je zmíněn název firmy, přelož ho na ticker (Rheinmetall → RHM.DE, Xiaomi → 1810.HK, Nvidia → NVDA)
 - Ignoruj ETF, indexy a makro tickery (SPY, QQQ, GLD, TLT, VIX, USD, EUR, ...)
+- Nikdy nevracej obyčejná anglická slova z headline nebo snippetů (např. STOCK, GROUP, TRUST, ALERT, DEAL, RATES, SLIPS, DROPS)
 
 Vrať POUZE JSON array tickerů, nic jiného. Příklad: ["NVDA", "RHM.DE", "1810.HK", "AAPL"]
 Pokud nic nenajdeš, vrať: []"""
@@ -71,10 +72,12 @@ TICKER_STOPWORDS = {
     "USD", "VIX", "WSJ",
 }
 TICKER_NOISE_WORDS = {
-    "ABOUT", "ABOVE", "AFTER", "BREAK", "CHINA", "CLOSE", "GROUP", "GROUPS",
-    "INDEX", "MAJOR", "MARKET", "MARKETS", "MOVER", "MOVERS", "NEWS", "OPEN",
-    "OTHER", "PRICE", "PRICES", "REPORT", "SHARE", "SHARES", "SOUTH", "STOCK",
-    "STOCKS", "TODAY", "TOTAL", "TREND", "UNDER", "VALUE",
+    "ABOUT", "ABOVE", "ACQUI", "AFTER", "ALERT", "BREAK", "CHINA", "CLOSE",
+    "DAY", "DEAL", "DROPS", "EROCK", "FRESH", "GROUP", "GROUPS", "INDEX",
+    "IRAN", "JUN", "LOWER", "MAJOR", "MARKET", "MARKETS", "MOVER", "MOVERS",
+    "NEWS", "OPEN", "OTHER", "PRICE", "PRICES", "RATES", "REPORT", "RISES",
+    "SHARE", "SHARES", "SLIPS", "SNAPS", "SOUTH", "STOCK", "STOCKS", "TODAY",
+    "TOTAL", "TREND", "TRUST", "UNDER", "VALUE", "WEIGH",
 }
 ALPHA_VANTAGE_MIN_PRICE = 5.0
 ALPHA_VANTAGE_MIN_VOLUME = 500_000
@@ -386,8 +389,18 @@ async def run_deep_filter_with_diagnostics(
 
     settings = get_settings(user_id)
     max_positions = int(settings.get("max_positions", 20))
-    total_portfolio_value = portfolio.total_value_czk + portfolio.cash_czk
+    total_portfolio_value = portfolio.total_value_czk
     base_size_czk = total_portfolio_value * 0.80 / max_positions
+    log_event(
+        logger,
+        logging.INFO,
+        'stage2_sizing_context',
+        total_portfolio_value=round(total_portfolio_value, 2),
+        cash_czk=round(portfolio.cash_czk, 2),
+        max_positions=max_positions,
+        base_size_czk=round(base_size_czk, 2),
+        market_regime=market_context.market_regime,
+    )
 
     diagnostics: dict[str, Any] = {
         "top_signals_count": len(top_signals),

@@ -35,9 +35,19 @@ def build_recommendations_with_diagnostics(
     n_positions = len(portfolio.positions)
     portfolio_full = n_positions >= max_positions
 
-    total_portfolio_value = portfolio.total_value_czk + portfolio.cash_czk
+    total_portfolio_value = portfolio.total_value_czk
     reserve_min = total_portfolio_value * cash_reserve_pct
     available_cash = portfolio.cash_czk - reserve_min
+    log_event(
+        logger,
+        logging.INFO,
+        'recommendation_cash_context',
+        total_portfolio_value=round(total_portfolio_value, 2),
+        cash_czk=round(portfolio.cash_czk, 2),
+        cash_reserve_pct=cash_reserve_pct,
+        reserve_min=round(reserve_min, 2),
+        available_cash=round(available_cash, 2),
+    )
 
     diagnostics: dict[str, Any] = {
         "candidates_in": len(candidates),
