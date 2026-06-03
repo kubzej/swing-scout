@@ -13,6 +13,7 @@ from app.services.market.technical import get_technicals
 from app.agent.watchlist_manager import get_active_watchlist
 from app.ai.client import call_llm
 from app.search.client import search
+from app.core.run_logging import log_event
 from app.core.supabase import get_supabase
 
 logger = logging.getLogger(__name__)
@@ -156,7 +157,7 @@ async def generate_report(
                 for r in market_news[:3]
             )
             try:
-                market_summary = await call_llm(MARKET_SUMMARY_PROMPT, news_titles, max_tokens=120)
+                market_summary = await call_llm(MARKET_SUMMARY_PROMPT, news_titles, max_tokens=120, label='report_market_summary')
                 parts.append(market_summary)
                 parts.append("")
             except Exception as e:
@@ -177,7 +178,7 @@ async def generate_report(
     # COMMENTARY
     try:
         summary = _build_portfolio_summary(portfolio, position_flags)
-        commentary = await call_llm(COMMENTARY_PROMPT, summary, max_tokens=150)
+        commentary = await call_llm(COMMENTARY_PROMPT, summary, max_tokens=150, label='report_commentary')
         parts.append("## Komentář\n")
         parts.append(commentary)
         parts.append("")
@@ -282,7 +283,9 @@ async def generate_report(
         parts.append(f"Signály: {sample}{more}")
     parts.append(f"Kandidátů po deep filtru: **{n_candidates}**")
 
-    return "\n".join(parts)
+    report = '\n'.join(parts)
+    log_event(logger, logging.INFO, 'report_generated', sections=len(parts), recommendations=len(recommendations), warnings=discovery_log.get('warnings_count'), report_chars=len(report))
+    return report
 
 
 def _build_decision(recommendations: List[dict], flags) -> dict:

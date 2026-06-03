@@ -4,14 +4,16 @@ Creates a daily_runs record, runs all agent steps, saves results.
 """
 import logging
 from datetime import datetime, timezone
+from time import perf_counter
 from typing import Any
 
-from app.agent.discovery import run_deep_filter, run_signal_scan
+from app.agent.discovery import run_deep_filter_with_diagnostics, run_signal_scan
 from app.agent.position_monitor import monitor_positions
-from app.agent.recommendation_engine import build_recommendations
+from app.agent.recommendation_engine import build_recommendations_with_diagnostics
 from app.agent.report_generator import generate_report
 from app.agent.watchlist_manager import cleanup_stale
 from app.core.redis import get_redis
+from app.core.run_logging import bind_run_context, log_event, reset_run_context
 from app.core.supabase import get_supabase
 from app.services.market.market_context import get_market_context
 from app.services.portfolio_service import get_portfolio_snapshot
@@ -22,7 +24,7 @@ logger = logging.getLogger(__name__)
 class RunIssueCollector(logging.Handler):
     """Collect warning/error records so the UI can surface degraded runs."""
 
-    def __init__(self, max_items: int = 10):
+    def __init__(self, max_items: int | None = None):
         super().__init__(level=logging.WARNING)
         self.max_items = max_items
         self.total_count = 0
@@ -49,7 +51,7 @@ class RunIssueCollector(logging.Handler):
         if source not in self.warning_sources:
             self.warning_sources.append(source)
 
-        if len(self.warnings) < self.max_items:
+        if self.max_items is None or len(self.warnings) < self.max_items:
             self.warnings.append({
                 'level': record.levelname,
                 'source': source,
@@ -70,6 +72,8 @@ def _build_discovery_log(
     candidates: list,
     collector: RunIssueCollector,
     *,
+    stage2_diagnostics: dict[str, Any] | None = None,
+    recommendation_diagnostics: dict[str, Any] | None = None,
     failure_reason: str | None = None,
     failed_step: str | None = None,
 ) -> dict[str, Any]:
@@ -79,6 +83,11 @@ def _build_discovery_log(
         'candidates_found': len(candidates),
     }
     discovery_log.update(collector.snapshot())
+
+    if stage2_diagnostics is not None:
+        discovery_log["stage2_diagnostics"] = stage2_diagnostics
+    if recommendation_diagnostics is not None:
+        discovery_log["recommendation_diagnostics"] = recommendation_diagnostics
 
     if failed_step:
         discovery_log['failed_step'] = failed_step
@@ -104,65 +113,88 @@ async def run_daily(user_id: str) -> str:
         'started_at': datetime.now(timezone.utc).isoformat(),
     }).execute()
     run_id = run_record.data[0]['id']
+    context_token = bind_run_context(run_id=run_id, run_type='daily', agent_user_id=user_id)
     logger.info('Daily run started: %s', run_id)
+    log_event(logger, logging.INFO, 'daily_run_started')
 
     market_ctx = None
     portfolio = None
     signals = []
     candidates = []
+    stage2_diagnostics: dict[str, Any] = {}
+    recommendation_diagnostics: dict[str, Any] = {}
     step = 'market context'
 
     try:
         # 1. Market context
         logger.info('Fetching market context...')
+        stage_started = perf_counter()
         market_ctx = await get_market_context(redis, user_id)
+        log_event(logger, logging.INFO, 'stage_completed', stage='market_context', duration_ms=round((perf_counter() - stage_started) * 1000), market_regime=market_ctx.market_regime, fng_score=market_ctx.fng_score)
 
         # 2. Portfolio state
         step = 'portfolio state'
         logger.info('Fetching portfolio state...')
+        stage_started = perf_counter()
         portfolio = await get_portfolio_snapshot(user_id, redis)
+        log_event(logger, logging.INFO, 'stage_completed', stage='portfolio_state', duration_ms=round((perf_counter() - stage_started) * 1000), open_positions=len(portfolio.positions), cash_czk=portfolio.cash_czk)
 
         # 3. Re-evaluate pending recommendations
         step = 'pending recommendation re-evaluation'
         logger.info('Re-evaluating pending recommendations...')
+        stage_started = perf_counter()
         await _reevaluate_pending(db, redis, user_id)
+        log_event(logger, logging.INFO, 'stage_completed', stage='pending_recommendation_re_evaluation', duration_ms=round((perf_counter() - stage_started) * 1000))
 
         # 4. Position monitor
         step = 'position monitor'
         logger.info('Running position monitor...')
+        stage_started = perf_counter()
         position_flags = await monitor_positions(portfolio, market_ctx, redis, user_id)
         logger.info('Position flags: %d', len(position_flags))
+        log_event(logger, logging.INFO, 'stage_completed', stage='position_monitor', duration_ms=round((perf_counter() - stage_started) * 1000), position_flags=len(position_flags))
 
         # 5. Discovery
         step = 'discovery stage 1'
         logger.info('Running discovery Stage 1...')
+        stage_started = perf_counter()
         signals = await run_signal_scan(redis)
+        log_event(logger, logging.INFO, 'stage_completed', stage='discovery_stage_1', duration_ms=round((perf_counter() - stage_started) * 1000), signals=len(signals))
 
         step = 'discovery stage 2'
         logger.info('Running discovery Stage 2 (%d signals)...', len(signals))
-        candidates = await run_deep_filter(signals, portfolio, market_ctx, redis, user_id)
+        stage_started = perf_counter()
+        candidates, stage2_diagnostics = await run_deep_filter_with_diagnostics(signals, portfolio, market_ctx, redis, user_id)
+        log_event(logger, logging.INFO, 'stage_completed', stage='discovery_stage_2', duration_ms=round((perf_counter() - stage_started) * 1000), candidates=len(candidates), diagnostics=stage2_diagnostics)
 
         # 6. Recommendation engine
         step = 'recommendation engine'
         logger.info('Building recommendations...')
-        raw_recs = build_recommendations(candidates, position_flags, portfolio, market_ctx, user_id)
+        stage_started = perf_counter()
+        raw_recs, recommendation_diagnostics = build_recommendations_with_diagnostics(candidates, position_flags, portfolio, market_ctx, user_id)
+        log_event(logger, logging.INFO, 'stage_completed', stage='recommendation_engine', duration_ms=round((perf_counter() - stage_started) * 1000), recommendations=len(raw_recs), diagnostics=recommendation_diagnostics)
 
         # 7. Fetch current prices for recommendations
         step = 'price enrichment'
+        stage_started = perf_counter()
         await _fill_recommended_prices(raw_recs, redis)
+        log_event(logger, logging.INFO, 'stage_completed', stage='price_enrichment', duration_ms=round((perf_counter() - stage_started) * 1000), recommendations=len(raw_recs))
 
         # 8. Save recommendations to DB
         step = 'recommendation persistence'
+        stage_started = perf_counter()
         for rec in raw_recs:
             rec['user_id'] = user_id
             rec['run_id'] = run_id
             rec['status'] = 'pending'
             db.table('recommendations').insert(rec).execute()
+        log_event(logger, logging.INFO, 'stage_completed', stage='recommendation_persistence', duration_ms=round((perf_counter() - stage_started) * 1000), recommendations=len(raw_recs))
 
         # 9. Generate report
         step = 'report generation'
         logger.info('Generating report...')
-        discovery_log = _build_discovery_log(signals, candidates, issue_collector)
+        stage_started = perf_counter()
+        discovery_log = _build_discovery_log(signals, candidates, issue_collector, stage2_diagnostics=stage2_diagnostics, recommendation_diagnostics=recommendation_diagnostics)
         report_content = await generate_report(
             portfolio=portfolio,
             recommendations=raw_recs,
@@ -172,6 +204,8 @@ async def run_daily(user_id: str) -> str:
             redis=redis,
             user_id=user_id,
         )
+
+        log_event(logger, logging.INFO, 'stage_completed', stage='report_generation', duration_ms=round((perf_counter() - stage_started) * 1000), report_chars=len(report_content or ''))
 
         # 10. Portfolio snapshot for history
         step = 'portfolio snapshot'
@@ -186,11 +220,13 @@ async def run_daily(user_id: str) -> str:
 
         # 11. Cleanup stale watchlist
         step = 'watchlist cleanup'
+        stage_started = perf_counter()
         await cleanup_stale(user_id)
+        log_event(logger, logging.INFO, 'stage_completed', stage='watchlist_cleanup', duration_ms=round((perf_counter() - stage_started) * 1000))
 
         # 12. Mark completed
         step = 'completion'
-        discovery_log = _build_discovery_log(signals, candidates, issue_collector)
+        discovery_log = _build_discovery_log(signals, candidates, issue_collector, stage2_diagnostics=stage2_diagnostics, recommendation_diagnostics=recommendation_diagnostics)
         db.table('daily_runs').update({
             'status': 'completed',
             'completed_at': datetime.now(timezone.utc).isoformat(),
@@ -203,15 +239,19 @@ async def run_daily(user_id: str) -> str:
         }).eq('id', run_id).execute()
 
         logger.info('Daily run completed: %s', run_id)
+        log_event(logger, logging.INFO, 'daily_run_completed', warnings=issue_collector.total_count, signals=len(signals), candidates=len(candidates), recommendations=len(raw_recs))
 
     except Exception as e:
         discovery_log = _build_discovery_log(
             signals,
             candidates,
             issue_collector,
+            stage2_diagnostics=stage2_diagnostics,
+            recommendation_diagnostics=recommendation_diagnostics,
             failure_reason=str(e),
             failed_step=step,
         )
+        log_event(logger, logging.ERROR, 'daily_run_failed', stage=step, error=str(e), error_type=type(e).__name__)
         logger.error('Daily run failed during %s: %s', step, e, exc_info=True)
         db.table('daily_runs').update({
             'status': 'failed',
@@ -222,6 +262,7 @@ async def run_daily(user_id: str) -> str:
         raise
     finally:
         root_logger.removeHandler(issue_collector)
+        reset_run_context(context_token)
 
     return run_id
 

@@ -12,6 +12,7 @@ import logging
 import math
 from typing import List, Dict, Optional
 from app.core.cache import CacheTTL
+from app.core.run_logging import log_event
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,7 @@ async def get_quotes(redis, tickers: List[str]) -> Dict[str, dict]:
             missing.append(t)
 
     if not missing:
+        log_event(logger, logging.INFO, 'quotes_cache_hit', requested=len(tickers), returned=len(results))
         return results
 
     try:
@@ -92,7 +94,8 @@ async def get_quotes(redis, tickers: List[str]) -> Dict[str, dict]:
         )
 
         if df.empty:
-            logger.warning("yf.download() returned empty for %s", missing)
+            logger.warning('yf.download() returned empty for %s', missing)
+            log_event(logger, logging.WARNING, 'quotes_download_empty', missing=missing)
             return results
 
         for t in missing:
@@ -134,15 +137,21 @@ async def get_quotes(redis, tickers: List[str]) -> Dict[str, dict]:
                 logger.warning("Failed to process quote for %s: %s", t, e)
 
     except Exception as e:
-        logger.error("yf.download() failed: %s", e)
+        log_event(logger, logging.ERROR, 'quotes_download_failed', missing=missing, error=str(e), error_type=type(e).__name__)
+        logger.error('yf.download() failed: %s', e)
 
+    fetched = len([ticker for ticker in missing if ticker in results])
+    cache_hits = len(tickers) - len(missing)
+    log_event(logger, logging.INFO, 'quotes_completed', requested=len(tickers), cache_hits=cache_hits, fetched=fetched, returned=len(results))
     return results
 
 
 async def get_fx_rates(redis) -> Dict[str, float]:
     cached = await redis.get("ss:fx_rates")
     if cached:
-        return json.loads(cached)
+        rates = json.loads(cached)
+        log_event(logger, logging.INFO, 'fx_rates_cache_hit', currencies=list(rates.keys()))
+        return rates
 
     rates: Dict[str, float] = {
         "USD_CZK": 23.0,
@@ -194,7 +203,8 @@ async def get_fx_rates(redis) -> Dict[str, float]:
     except Exception as e:
         logger.warning("FX rates fetch failed, using defaults: %s", e)
 
-    await redis.set("ss:fx_rates", json.dumps(rates), ex=CacheTTL.FX_RATES)
+    await redis.set('ss:fx_rates', json.dumps(rates), ex=CacheTTL.FX_RATES)
+    log_event(logger, logging.INFO, 'fx_rates_completed', rates=rates)
     return rates
 
 

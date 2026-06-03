@@ -3,64 +3,93 @@ Recommendation engine — converts candidates and position flags to structured r
 Applies guards: rejection calibration (soft only), operating mode, rotation logic, cash guard, options.
 """
 import logging
-from typing import List, Optional
+from typing import Any, List, Optional
 from datetime import datetime, timezone
 
 from app.agent.discovery import Candidate
 from app.agent.position_monitor import PositionFlag
 from app.services.portfolio_service import PortfolioSnapshot
 from app.services.market.market_context import MarketContext
+from app.core.run_logging import log_event
 from app.core.supabase import get_supabase
 
 logger = logging.getLogger(__name__)
 
 
-def build_recommendations(
+
+def build_recommendations_with_diagnostics(
     candidates: List[Candidate],
     flags: List[PositionFlag],
     portfolio: PortfolioSnapshot,
     market_context: MarketContext,
     user_id: str,
-) -> List[dict]:
+) -> tuple[List[dict], dict[str, Any]]:
     db = get_supabase()
     recommendations = []
 
-    # Load settings for max_positions and cash_reserve_pct
     settings = _load_settings(db, user_id)
     max_positions = settings.get("max_positions", 20)
     cash_reserve_pct = float(settings.get("cash_reserve_pct", 0.07))
-
-    # REJECTION CALIBRATION — soft only, no permanent blocks
     recently_rejected = _load_recently_rejected(db, user_id)
 
-    # OPERATING MODE
     n_positions = len(portfolio.positions)
     portfolio_full = n_positions >= max_positions
 
-    # CASH GUARD — reserve based on total portfolio value (grows/shrinks with portfolio)
     total_portfolio_value = portfolio.total_value_czk + portfolio.cash_czk
     reserve_min = total_portfolio_value * cash_reserve_pct
     available_cash = portfolio.cash_czk - reserve_min
 
-    # PROCESS CANDIDATES (new entries)
+    diagnostics: dict[str, Any] = {
+        "candidates_in": len(candidates),
+        "position_flags_in": len(flags),
+        "recommendations_out": 0,
+        "recently_rejected_skipped": 0,
+        "portfolio_full_skipped": 0,
+        "insufficient_cash_skipped": 0,
+        "rotation_recommendations": 0,
+        "buy_recommendations": 0,
+        "flag_recommendations": 0,
+        "cash_reserve_min": round(reserve_min, 2),
+        "available_cash_start": round(available_cash, 2),
+        "available_cash_end": round(available_cash, 2),
+        "skip_reasons": [],
+    }
+
+    def record_skip(reason: str, ticker: str, detail: str | None = None) -> None:
+        key = f"{reason}_skipped"
+        if key in diagnostics:
+            diagnostics[key] += 1
+        diagnostics["skip_reasons"].append({
+            "ticker": ticker,
+            "reason": reason,
+            "detail": detail,
+        })
+
     for candidate in candidates:
         ticker = candidate.ticker
 
-        # Skip if recently rejected without reason AND conditions haven't materially changed
         if ticker in recently_rejected:
-            logger.info("Skipping %s — recently rejected (soft)", ticker)
+            logger.info('Skipping %s — recently rejected (soft)', ticker)
+            record_skip('recently_rejected', ticker)
+            log_event(logger, logging.INFO, 'recommendation_candidate_skipped', ticker=ticker, reason='recently_rejected')
             continue
 
         if portfolio_full:
             rotation = _find_rotation_candidate(portfolio)
             if not rotation:
-                logger.info("Portfolio full, no rotation candidate for %s", ticker)
+                logger.info('Portfolio full, no rotation candidate for %s', ticker)
+                record_skip('portfolio_full', ticker)
+                log_event(logger, logging.INFO, 'recommendation_candidate_skipped', ticker=ticker, reason='portfolio_full')
                 continue
             recommendations.append(_make_rotation_recommendation(candidate, rotation))
+            diagnostics['rotation_recommendations'] += 1
+            log_event(logger, logging.INFO, 'recommendation_rotation_created', ticker=ticker, exit_ticker=rotation, confidence=candidate.confidence)
             continue
 
         if available_cash < candidate.recommended_size_czk * 0.5:
-            logger.info("Insufficient cash for %s (available: %.0f CZK)", ticker, available_cash)
+            logger.info('Insufficient cash for %s (available: %.0f CZK)', ticker, available_cash)
+            record_skip('insufficient_cash', ticker, f'available_cash={available_cash:.0f}')
+            log_event(logger, logging.INFO, 'recommendation_candidate_skipped', ticker=ticker, reason='insufficient_cash', available_cash=round(available_cash, 2))
             continue
 
         rec = {
@@ -87,7 +116,6 @@ def build_recommendations(
             },
         }
 
-        # CSP alternative if ticker has been on watchlist >= 14 days
         watchlist_age = _get_watchlist_age(db, user_id, ticker)
         if watchlist_age and watchlist_age >= 14 and candidate.play_type in ("A", "B"):
             rec["options_details"].update({
@@ -96,9 +124,10 @@ def build_recommendations(
             })
 
         recommendations.append(rec)
+        diagnostics['buy_recommendations'] += 1
+        log_event(logger, logging.INFO, 'recommendation_created', ticker=ticker, action='buy', confidence=candidate.confidence, size_czk=candidate.recommended_size_czk)
         available_cash -= candidate.recommended_size_czk
 
-    # PROCESS POSITION FLAGS
     for flag in flags:
         pos = next((p for p in portfolio.positions if p.ticker == flag.ticker), None)
         if not pos:
@@ -118,6 +147,7 @@ def build_recommendations(
                 "is_options_play": False,
                 "options_details": None,
             })
+            diagnostics["flag_recommendations"] += 1
             available_cash -= 17000
 
         elif flag.flag_type in ("exit_now", "zombie"):
@@ -134,6 +164,7 @@ def build_recommendations(
                 "is_options_play": False,
                 "options_details": None,
             })
+            diagnostics["flag_recommendations"] += 1
 
         elif flag.flag_type == "partial_profit":
             partial_size = round(pos.current_value_czk * 0.3)
@@ -150,9 +181,29 @@ def build_recommendations(
                 "is_options_play": False,
                 "options_details": None,
             })
+            diagnostics["flag_recommendations"] += 1
 
-    # Sort: exits first, then by confidence desc
-    recommendations.sort(key=lambda r: (r["action"] not in ("exit", "exit_now"), -r["confidence"]))
+    recommendations.sort(key=lambda r: (r['action'] not in ('exit', 'exit_now'), -r['confidence']))
+    diagnostics['recommendations_out'] = len(recommendations)
+    log_event(logger, logging.INFO, 'recommendation_engine_completed', diagnostics=diagnostics)
+    diagnostics["available_cash_end"] = round(available_cash, 2)
+    return recommendations, diagnostics
+
+
+def build_recommendations(
+    candidates: List[Candidate],
+    flags: List[PositionFlag],
+    portfolio: PortfolioSnapshot,
+    market_context: MarketContext,
+    user_id: str,
+) -> List[dict]:
+    recommendations, _ = build_recommendations_with_diagnostics(
+        candidates,
+        flags,
+        portfolio,
+        market_context,
+        user_id,
+    )
     return recommendations
 
 

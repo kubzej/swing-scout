@@ -1,5 +1,41 @@
 import { API_URL, getAuthHeader } from '@/lib/api/client';
 
+
+export interface RunRejection {
+  ticker: string;
+  reason: string;
+  detail?: string | null;
+}
+
+export interface Stage2Diagnostics {
+  top_signals_count?: number;
+  held_skipped?: number;
+  invalid_stock_skipped?: number;
+  llm_skip?: number;
+  bear_regime_skipped?: number;
+  exception_skipped?: number;
+  watchlist_adds?: number;
+  candidates_found?: number;
+  rejection_counts?: Record<string, number>;
+  rejections?: RunRejection[];
+}
+
+export interface RecommendationDiagnostics {
+  candidates_in?: number;
+  position_flags_in?: number;
+  recommendations_out?: number;
+  recently_rejected_skipped?: number;
+  portfolio_full_skipped?: number;
+  insufficient_cash_skipped?: number;
+  rotation_recommendations?: number;
+  buy_recommendations?: number;
+  flag_recommendations?: number;
+  cash_reserve_min?: number;
+  available_cash_start?: number;
+  available_cash_end?: number;
+  skip_reasons?: RunRejection[];
+}
+
 export interface RunIssue {
   level: string;
   source: string;
@@ -16,6 +52,8 @@ export interface RunDiscoveryLog {
   warnings?: RunIssue[];
   failure_reason?: string | null;
   failed_step?: string | null;
+  stage2_diagnostics?: Stage2Diagnostics | null;
+  recommendation_diagnostics?: RecommendationDiagnostics | null;
 }
 
 export interface RunSummary {

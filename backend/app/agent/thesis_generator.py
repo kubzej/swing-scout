@@ -49,7 +49,7 @@ Dostupné informace z webu:
 Napiš stručnou investiční tezi pro tuto pozici."""
 
     try:
-        thesis_text = await call_llm(SYSTEM_PROMPT, user_prompt, max_tokens=400)
+        thesis_text = await call_llm(SYSTEM_PROMPT, user_prompt, max_tokens=400, label=f'retroactive_thesis:{ticker}')
     except Exception as e:
         logger.error("LLM call failed for retroactive thesis %s: %s", ticker, e)
         thesis_text = f"Manuálně zadaná pozice {ticker} — thesis nebyla automaticky vygenerována."

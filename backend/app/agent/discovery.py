@@ -12,7 +12,7 @@ import asyncio
 import json
 import logging
 import re
-from typing import List, Optional
+from typing import Any, List, Optional
 from dataclasses import dataclass
 from datetime import date
 
@@ -26,6 +26,7 @@ from app.services.market.quotes import get_fx_rates
 from app.services.market.market_context import MarketContext
 from app.services.portfolio_service import PortfolioSnapshot
 from app.ai.client import call_llm
+from app.core.run_logging import log_event
 from app.agent.watchlist_manager import add_or_update_watchlist
 
 logger = logging.getLogger(__name__)
@@ -131,7 +132,7 @@ Nepoužívej emojis v žádném z textových polí."""
 async def _extract_tickers_with_llm(articles_text: str, signal_type: str, signal_reason: str) -> List[SignalTicker]:
     """Ask Claude to extract tickers from article content. Handles company names, EU/HK formats."""
     try:
-        response = await call_llm(TICKER_EXTRACTION_PROMPT, articles_text[:3000], max_tokens=300)
+        response = await call_llm(TICKER_EXTRACTION_PROMPT, articles_text[:3000], max_tokens=300, label=f'ticker_extraction:{signal_type}')
         # Parse JSON array from response
         import re
         match = re.search(r'\[.*?\]', response, re.DOTALL)
@@ -287,6 +288,7 @@ async def _augment_with_news_searches(signal_map: dict[str, SignalTicker]) -> No
         query = f"{query_template} {today}"
         try:
             results = await search(query, max_results=5, days=2)
+            log_event(logger, logging.INFO, 'signal_search_completed', signal_type=signal_type, query=query[:80], results=len(results))
             if not results:
                 continue
 
@@ -313,7 +315,8 @@ async def run_signal_scan(redis) -> List[SignalTicker]:
         mover_payload = await get_top_movers(redis)
         mover_signals = _extract_signals_from_alpha_vantage(mover_payload)
         _add_signals_to_map(signal_map, mover_signals)
-        logger.info("Stage 1 Alpha Vantage signals: %d", len(mover_signals))
+        logger.info('Stage 1 Alpha Vantage signals: %d', len(mover_signals))
+        log_event(logger, logging.INFO, 'stage1_alpha_vantage_completed', signals=len(mover_signals))
     except Exception as e:
         logger.warning("Alpha Vantage movers failed: %s", e)
 
@@ -325,18 +328,20 @@ async def run_signal_scan(redis) -> List[SignalTicker]:
     logger.info("Stage 1 raw signals: %d — validating...", len(all_signals))
     valid_signals = await _validate_tickers(all_signals, redis)
     valid_signals.sort(key=lambda sig: sig.signal_score, reverse=True)
-    logger.info("Stage 1 validated: %d signals", len(valid_signals))
+    logger.info('Stage 1 validated: %d signals', len(valid_signals))
+    log_event(logger, logging.INFO, 'stage1_completed', raw_signals=len(all_signals), validated_signals=len(valid_signals))
 
     return valid_signals
 
 
-async def run_deep_filter(
+
+async def run_deep_filter_with_diagnostics(
     signals: List[SignalTicker],
     portfolio: PortfolioSnapshot,
     market_context: MarketContext,
     redis,
     user_id: str,
-) -> List[Candidate]:
+) -> tuple[List[Candidate], dict[str, Any]]:
     """Stage 2 — filter top 15 signals to 5-10 actionable candidates with thesis."""
     top_signals = sorted(signals, key=lambda s: s.signal_score, reverse=True)[:15]
     held = {p.ticker for p in portfolio.positions}
@@ -349,8 +354,28 @@ async def run_deep_filter(
     settings = get_settings(user_id)
     max_positions = int(settings.get("max_positions", 20))
     total_portfolio_value = portfolio.total_value_czk + portfolio.cash_czk
-    # Base size: deploy 80% of portfolio equally across max positions
     base_size_czk = total_portfolio_value * 0.80 / max_positions
+
+    diagnostics: dict[str, Any] = {
+        "top_signals_count": len(top_signals),
+        "held_skipped": 0,
+        "invalid_stock_skipped": 0,
+        "llm_skip": 0,
+        "bear_regime_skipped": 0,
+        "exception_skipped": 0,
+        "watchlist_adds": 0,
+        "candidates_found": 0,
+        "rejection_counts": {},
+        "rejections": [],
+    }
+
+    def record_rejection(reason: str, ticker: str, detail: str | None = None) -> None:
+        diagnostics["rejection_counts"][reason] = diagnostics["rejection_counts"].get(reason, 0) + 1
+        diagnostics["rejections"].append({
+            "ticker": ticker,
+            "reason": reason,
+            "detail": detail,
+        })
 
     candidates: List[Candidate] = []
     watchlist_adds: List[dict] = []
@@ -358,11 +383,17 @@ async def run_deep_filter(
     for sig in top_signals:
         ticker = sig.ticker
         if ticker in held:
+            diagnostics['held_skipped'] += 1
+            record_rejection('already_held', ticker)
+            log_event(logger, logging.INFO, 'stage2_ticker_skipped', ticker=ticker, reason='already_held')
             continue
 
         try:
             fundamentals = await get_fundamentals(redis, ticker)
             if not is_valid_stock(fundamentals):
+                diagnostics['invalid_stock_skipped'] += 1
+                record_rejection('invalid_stock', ticker)
+                log_event(logger, logging.INFO, 'stage2_ticker_skipped', ticker=ticker, reason='invalid_stock')
                 continue
 
             technicals = await get_technicals(redis, ticker)
@@ -386,27 +417,36 @@ Portfolio fit: {fit_note}
 News:
 {news_context[:600]}"""
 
-            response_text = await call_llm(CLASSIFICATION_PROMPT, context_for_llm, max_tokens=400)
+            response_text = await call_llm(CLASSIFICATION_PROMPT, context_for_llm, max_tokens=400, label=f'stage2_classification:{ticker}')
             classification = _parse_classification(response_text)
 
             if not classification or classification.get("skip"):
-                watchlist_adds.append({"ticker": ticker, "stage": "watching",
-                                        "signal_reason": sig.signal_reason, "theme": None})
+                diagnostics['llm_skip'] += 1
+                record_rejection('llm_skip', ticker)
+                log_event(logger, logging.INFO, 'stage2_ticker_skipped', ticker=ticker, reason='llm_skip')
+                watchlist_adds.append({
+                    "ticker": ticker,
+                    "stage": "watching",
+                    "signal_reason": sig.signal_reason,
+                    "theme": None,
+                })
                 continue
 
             confidence = classification.get("confidence", 2)
             if bear_regime and confidence < 3:
+                diagnostics['bear_regime_skipped'] += 1
+                record_rejection('bear_regime', ticker, f'confidence={confidence}')
+                log_event(logger, logging.INFO, 'stage2_ticker_skipped', ticker=ticker, reason='bear_regime', confidence=confidence)
                 watchlist_adds.append({
-                    "ticker": ticker, "stage": "candidate",
+                    "ticker": ticker,
+                    "stage": "candidate",
                     "signal_reason": f"Bear regime — čekám na silnější signál. {sig.signal_reason}",
                     "theme": fundamentals.get("sector"),
                 })
                 continue
 
-            # Scale by confidence: 4=130%, 3=100%, 2=75%, 1=50% of base
             confidence_multiplier = {4: 1.3, 3: 1.0, 2: 0.75, 1: 0.5}.get(confidence, 1.0)
             size_czk = round(base_size_czk * confidence_multiplier / 1000) * 1000
-            # Reserve: 60% of initial for conf 4/3, 50% for conf 2, none for conf 1
             reserve_ratio = {4: 0.60, 3: 0.60, 2: 0.50, 1: 0.0}.get(confidence, 0.5)
             reserve_czk = round(size_czk * reserve_ratio / 1000) * 1000
 
@@ -422,6 +462,8 @@ News:
                     reserve_czk = round(reserve_shares * price_czk)
 
             theme = fundamentals.get("sector")
+
+            log_event(logger, logging.INFO, 'stage2_candidate_accepted', ticker=ticker, play_type=classification.get('play_type', 'A'), confidence=confidence, sector=theme)
 
             candidates.append(Candidate(
                 ticker=ticker,
@@ -443,25 +485,56 @@ News:
             ))
 
             watch_reason = classification.get("entry_rationale") or sig.signal_reason
-            watchlist_adds.append({"ticker": ticker, "stage": "candidate",
-                                    "signal_reason": watch_reason, "theme": theme})
+            watchlist_adds.append({
+                "ticker": ticker,
+                "stage": "candidate",
+                "signal_reason": watch_reason,
+                "theme": theme,
+            })
 
         except Exception as e:
-            logger.warning("Deep filter failed for %s: %s", ticker, e)
+            diagnostics['exception_skipped'] += 1
+            record_rejection('exception', ticker, str(e))
+            log_event(logger, logging.WARNING, 'stage2_ticker_exception', ticker=ticker, error=str(e), error_type=type(e).__name__)
+            logger.warning('Deep filter failed for %s: %s', ticker, e)
             continue
 
     for item in watchlist_adds:
         try:
             await add_or_update_watchlist(
-                user_id=user_id, ticker=item["ticker"], stage=item["stage"],
-                signal_reason=item["signal_reason"], theme=item.get("theme"),
+                user_id=user_id,
+                ticker=item["ticker"],
+                stage=item["stage"],
+                signal_reason=item["signal_reason"],
+                theme=item.get("theme"),
             )
         except Exception as e:
             logger.warning("Watchlist update failed for %s: %s", item["ticker"], e)
 
     candidates.sort(key=lambda c: c.confidence, reverse=True)
-    logger.info("Stage 2: %d candidates from %d signals", len(candidates), len(top_signals))
-    return candidates[:8]
+    trimmed_candidates = candidates[:8]
+    diagnostics["watchlist_adds"] = len(watchlist_adds)
+    diagnostics["candidates_found"] = len(trimmed_candidates)
+    logger.info('Stage 2: %d candidates from %d signals', len(trimmed_candidates), len(top_signals))
+    log_event(logger, logging.INFO, 'stage2_completed', top_signals=len(top_signals), candidates=len(trimmed_candidates), rejection_counts=diagnostics['rejection_counts'])
+    return trimmed_candidates, diagnostics
+
+
+async def run_deep_filter(
+    signals: List[SignalTicker],
+    portfolio: PortfolioSnapshot,
+    market_context: MarketContext,
+    redis,
+    user_id: str,
+) -> List[Candidate]:
+    candidates, _ = await run_deep_filter_with_diagnostics(
+        signals,
+        portfolio,
+        market_context,
+        redis,
+        user_id,
+    )
+    return candidates
 
 
 def _check_portfolio_fit(ticker: str, fundamentals: dict, portfolio: PortfolioSnapshot) -> str:
