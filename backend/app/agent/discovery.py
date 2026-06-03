@@ -64,10 +64,17 @@ SIGNAL_SEARCHES = [
 
 TICKER_REGEX = re.compile(r"\b(?:[0-9]{4}\.HK|[A-Z]{1,5}(?:\.[A-Z]{1,3})?)\b")
 US_TICKER_REGEX = re.compile(r"^[A-Z]{1,5}$")
+EU_HK_SUFFIXES = (".DE", ".L", ".F", ".OL", ".HK", ".PA", ".AS")
 TICKER_STOPWORDS = {
     "AI", "ALL", "AND", "ARE", "ATH", "CEO", "CFO", "ETF", "EPS", "EUR",
     "FDA", "GDP", "GLD", "HK", "IPO", "NYSE", "QQQ", "SEC", "SPY", "TLT",
     "USD", "VIX", "WSJ",
+}
+TICKER_NOISE_WORDS = {
+    "ABOUT", "ABOVE", "AFTER", "BREAK", "CHINA", "CLOSE", "GROUP", "GROUPS",
+    "INDEX", "MAJOR", "MARKET", "MARKETS", "MOVER", "MOVERS", "NEWS", "OPEN",
+    "OTHER", "PRICE", "PRICES", "REPORT", "SHARE", "SHARES", "SOUTH", "STOCK",
+    "STOCKS", "TODAY", "TOTAL", "TREND", "UNDER", "VALUE",
 }
 ALPHA_VANTAGE_MIN_PRICE = 5.0
 ALPHA_VANTAGE_MIN_VOLUME = 500_000
@@ -141,10 +148,11 @@ async def _extract_tickers_with_llm(articles_text: str, signal_type: str, signal
         tickers = json.loads(match.group())
         result = []
         for ticker in tickers:
-            if isinstance(ticker, str) and ticker.strip():
-                market = "EU_HK" if any(ticker.endswith(s) for s in (".DE", ".L", ".F", ".OL", ".HK", ".PA", ".AS")) else "US"
+            normalized = _normalize_search_ticker_candidate(ticker)
+            if normalized:
+                market = "EU_HK" if any(normalized.endswith(s) for s in EU_HK_SUFFIXES) else "US"
                 result.append(SignalTicker(
-                    ticker=ticker.strip().upper(),
+                    ticker=normalized,
                     signal_type=signal_type,
                     signal_reason=signal_reason,
                     market=market,
@@ -161,11 +169,11 @@ def _extract_tickers_with_regex(articles_text: str, signal_type: str, signal_rea
     seen: set[str] = set()
 
     for match in TICKER_REGEX.findall(articles_text.upper()):
-        ticker = match.strip().upper()
-        if ticker in seen or ticker in TICKER_STOPWORDS:
+        ticker = _normalize_search_ticker_candidate(match)
+        if not ticker or ticker in seen:
             continue
         seen.add(ticker)
-        market = "EU_HK" if any(ticker.endswith(s) for s in (".DE", ".L", ".F", ".OL", ".HK", ".PA", ".AS")) else "US"
+        market = "EU_HK" if any(ticker.endswith(s) for s in EU_HK_SUFFIXES) else "US"
         result.append(SignalTicker(
             ticker=ticker,
             signal_type=signal_type,
@@ -231,10 +239,35 @@ def _safe_int(value) -> Optional[int]:
         return None
 
 
+def _normalize_search_ticker_candidate(raw_ticker: Any) -> Optional[str]:
+    if not isinstance(raw_ticker, str):
+        return None
+
+    ticker = raw_ticker.strip().upper().strip(".,:;!?)(")
+    if not ticker:
+        return None
+    if ticker in TICKER_STOPWORDS or ticker in TICKER_NOISE_WORDS:
+        return None
+
+    if "." in ticker:
+        _, suffix = ticker.rsplit(".", 1)
+        normalized = f".{suffix}"
+        if normalized not in EU_HK_SUFFIXES:
+            return None
+        if normalized == ".HK":
+            return ticker if re.fullmatch(r"[0-9]{4}\.HK", ticker) else None
+        return ticker if re.fullmatch(r"[A-Z]{1,5}\.[A-Z]{1,3}", ticker) else None
+
+    if not US_TICKER_REGEX.fullmatch(ticker):
+        return None
+    if ticker in TICKER_NOISE_WORDS:
+        return None
+    return ticker
+
+
 def _is_supported_alpha_vantage_ticker(ticker: str) -> bool:
-    if not ticker or not US_TICKER_REGEX.fullmatch(ticker):
-        return False
-    if ticker in TICKER_STOPWORDS:
+    normalized = _normalize_search_ticker_candidate(ticker)
+    if not normalized or not US_TICKER_REGEX.fullmatch(normalized):
         return False
     return True
 
@@ -433,21 +466,39 @@ News:
                 continue
 
             confidence = classification.get("confidence", 2)
-            if bear_regime and confidence < 3:
+            play_type = classification.get("play_type", "A")
+
+            if bear_regime and confidence <= 1:
                 diagnostics['bear_regime_skipped'] += 1
-                record_rejection('bear_regime', ticker, f'confidence={confidence}')
-                log_event(logger, logging.INFO, 'stage2_ticker_skipped', ticker=ticker, reason='bear_regime', confidence=confidence)
+                record_rejection('bear_regime_low_confidence', ticker, f'confidence={confidence}')
+                log_event(logger, logging.INFO, 'stage2_ticker_skipped', ticker=ticker, reason='bear_regime_low_confidence', confidence=confidence)
                 watchlist_adds.append({
                     "ticker": ticker,
                     "stage": "candidate",
-                    "signal_reason": f"Bear regime — čekám na silnější signál. {sig.signal_reason}",
+                    "signal_reason": f"Bear regime — confidence je příliš nízká. {sig.signal_reason}",
+                    "theme": fundamentals.get("sector"),
+                })
+                continue
+
+            if bear_regime and play_type == "C" and confidence < 3:
+                diagnostics['bear_regime_skipped'] += 1
+                record_rejection('bear_regime_momentum', ticker, f'confidence={confidence}')
+                log_event(logger, logging.INFO, 'stage2_ticker_skipped', ticker=ticker, reason='bear_regime_momentum', confidence=confidence)
+                watchlist_adds.append({
+                    "ticker": ticker,
+                    "stage": "candidate",
+                    "signal_reason": f"Bear regime — momentum setup bez dost silné confidence. {sig.signal_reason}",
                     "theme": fundamentals.get("sector"),
                 })
                 continue
 
             confidence_multiplier = {4: 1.3, 3: 1.0, 2: 0.75, 1: 0.5}.get(confidence, 1.0)
+            if bear_regime:
+                confidence_multiplier *= 0.7
             size_czk = round(base_size_czk * confidence_multiplier / 1000) * 1000
             reserve_ratio = {4: 0.60, 3: 0.60, 2: 0.50, 1: 0.0}.get(confidence, 0.5)
+            if bear_regime:
+                reserve_ratio = min(reserve_ratio, 0.35)
             reserve_czk = round(size_czk * reserve_ratio / 1000) * 1000
 
             price_usd = technicals.get("price")
@@ -463,11 +514,11 @@ News:
 
             theme = fundamentals.get("sector")
 
-            log_event(logger, logging.INFO, 'stage2_candidate_accepted', ticker=ticker, play_type=classification.get('play_type', 'A'), confidence=confidence, sector=theme)
+            log_event(logger, logging.INFO, 'stage2_candidate_accepted', ticker=ticker, play_type=play_type, confidence=confidence, sector=theme, bear_regime=bear_regime)
 
             candidates.append(Candidate(
                 ticker=ticker,
-                play_type=classification.get("play_type", "A"),
+                play_type=play_type,
                 confidence=confidence,
                 thesis=classification.get("thesis", ""),
                 entry_rationale=classification.get("entry_rationale", ""),

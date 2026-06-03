@@ -9,13 +9,15 @@ interface RunIssuesPanelProps {
 }
 
 const REASON_LABELS: Record<string, string> = {
-  already_held: 'Uz drzené v portfoliu',
-  invalid_stock: 'Nevalidni ticker / instrument',
-  llm_skip: 'LLM oznacil jako nepouzitelné',
-  bear_regime: 'Bear rezim vyzadoval vyssi confidence',
-  exception: 'Selhani behem deep filteru',
-  recently_rejected: 'Nedavno zamitnute',
-  portfolio_full: 'Portfolio plne bez rotace',
+  already_held: 'Už držené v portfoliu',
+  invalid_stock: 'Neplatný ticker nebo instrument',
+  llm_skip: 'LLM označil jako nepoužitelné',
+  bear_regime: 'Bear režim vyžadoval vyšší confidence',
+  bear_regime_low_confidence: 'Bear režim vyřadil příliš slabou confidence',
+  bear_regime_momentum: 'Bear režim vyřadil slabý momentum setup',
+  exception: 'Selhání během deep filteru',
+  recently_rejected: 'Nedávno zamítnuté',
+  portfolio_full: 'Portfolio plné bez rotace',
   insufficient_cash: 'Nedostatek hotovosti',
 };
 
@@ -27,11 +29,11 @@ export function RunIssuesPanel({ status, errorMessage, discoveryLog }: RunIssues
   const warnings = discoveryLog?.warnings ?? [];
   const warningSources = discoveryLog?.warning_sources ?? [];
   const warningsCount = discoveryLog?.warnings_count ?? 0;
-  const failureReason = discoveryLog?.failure_reason ?? errorMessage;
+  const failureReason = discoveryLog?.failure_reason ?? errorMessage ?? 'Run selhal, ale backend neposlal podrobnější důvod.';
   const failedStep = discoveryLog?.failed_step;
   const stage2 = discoveryLog?.stage2_diagnostics ?? null;
   const recommendation = discoveryLog?.recommendation_diagnostics ?? null;
-  const hasFailure = status === 'failed' && Boolean(failureReason);
+  const hasFailure = status === 'failed';
   const hasWarnings = !hasFailure && Boolean(discoveryLog?.degraded_mode || warningsCount > 0);
   const hasWarningList = warnings.length > 0;
   const noRecommendations = recommendation?.recommendations_out === 0;
@@ -81,7 +83,7 @@ export function RunIssuesPanel({ status, errorMessage, discoveryLog }: RunIssues
                 </div>
               </div>
               <div className="rounded-2xl border border-border/70 bg-background/35 px-4 py-3">
-                <div className="text-xs uppercase tracking-[0.16em] text-muted-foreground">Recommendation Engine</div>
+                <div className="text-xs uppercase tracking-[0.16em] text-muted-foreground">Doporučovací vrstva</div>
                 <div className="mt-1 text-sm text-foreground">
                   {recommendation?.recommendations_out ?? 0} doporučení z {recommendation?.candidates_in ?? 0} kandidátů
                 </div>
@@ -99,14 +101,14 @@ export function RunIssuesPanel({ status, errorMessage, discoveryLog }: RunIssues
           {hasHoldDiagnostics ? (
             <details className="group rounded-2xl border border-border/70 bg-black/10 px-4 py-3">
               <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-medium text-foreground marker:hidden">
-                <span>Proc vznikl HOLD</span>
+                <span>Proč vznikl HOLD</span>
                 <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
               </summary>
 
               <div className="mt-3 space-y-4 border-t border-border/60 pt-3 text-sm leading-6 text-muted-foreground">
                 {stage2?.rejection_counts && Object.keys(stage2.rejection_counts).length > 0 ? (
                   <div className="space-y-2">
-                    <div className="text-xs uppercase tracking-[0.16em] text-muted-foreground">Stage 2 rejection counts</div>
+                    <div className="text-xs uppercase tracking-[0.16em] text-muted-foreground">Důvody vyřazení ve Stage 2</div>
                     <div className="space-y-1">
                       {Object.entries(stage2.rejection_counts).map(([reason, count]) => (
                         <div className="flex items-center justify-between gap-3" key={reason}>
@@ -120,14 +122,14 @@ export function RunIssuesPanel({ status, errorMessage, discoveryLog }: RunIssues
 
                 {recommendation ? (
                   <div className="space-y-2">
-                    <div className="text-xs uppercase tracking-[0.16em] text-muted-foreground">Recommendation skips</div>
+                    <div className="text-xs uppercase tracking-[0.16em] text-muted-foreground">Důvody bez doporučení</div>
                     <div className="space-y-1">
                       <div className="flex items-center justify-between gap-3">
-                        <span>Nedavno zamitnute</span>
+                        <span>Nedávno zamítnuté</span>
                         <span className="text-foreground">{recommendation.recently_rejected_skipped ?? 0}</span>
                       </div>
                       <div className="flex items-center justify-between gap-3">
-                        <span>Portfolio plne bez rotace</span>
+                        <span>Portfolio plné bez rotace</span>
                         <span className="text-foreground">{recommendation.portfolio_full_skipped ?? 0}</span>
                       </div>
                       <div className="flex items-center justify-between gap-3">
