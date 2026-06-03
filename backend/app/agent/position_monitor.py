@@ -1,0 +1,126 @@
+"""
+Position monitor — thesis validity, zombie detection, add triggers, Type C exit.
+Runs as part of daily_run and intraday_run.
+"""
+import logging
+from dataclasses import dataclass
+from datetime import datetime, timezone, timedelta
+from typing import List, Optional
+
+from app.services.portfolio_service import PortfolioSnapshot, PositionSnapshot
+from app.services.market.market_context import MarketContext
+from app.search.client import search
+from app.core.supabase import get_supabase
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PositionFlag:
+    ticker: str
+    flag_type: str  # add_trigger | zombie | exit_now | thesis_change | partial_profit | news_alert
+    detail: str
+    urgency: str = "normal"  # normal | high
+
+
+async def monitor_positions(
+    portfolio: PortfolioSnapshot,
+    market_context: MarketContext,
+    redis,
+    user_id: str,
+) -> List[PositionFlag]:
+    flags: List[PositionFlag] = []
+    db = get_supabase()
+
+    for pos in portfolio.positions:
+        ticker = pos.ticker
+
+        # Load thesis
+        thesis_response = (
+            db.table("theses")
+            .select("*")
+            .eq("user_id", user_id)
+            .eq("position_id", pos.id)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        thesis = thesis_response.data[0] if thesis_response.data else None
+        thesis_status = thesis.get("status", "intact") if thesis else "intact"
+        notes_log = thesis.get("notes_log", []) if thesis else []
+
+        # --- ZOMBIE DETECTION ---
+        is_zombie = _check_zombie(thesis_status, notes_log)
+        if is_zombie:
+            flags.append(PositionFlag(
+                ticker=ticker,
+                flag_type="zombie",
+                detail=f"Pozice bez aktivní teze — zvažit exit při příležitosti.",
+                urgency="high",
+            ))
+
+        # --- ADD TRIGGER (Type A/B only) ---
+        if pos.play_type != "C" and thesis_status in ("intact",):
+            if pos.unrealized_pnl_pct <= -20:
+                flags.append(PositionFlag(
+                    ticker=ticker,
+                    flag_type="add_trigger",
+                    detail=f"Pokles {pos.unrealized_pnl_pct:.1f}% — thesis intact, zvažit přikoupení.",
+                ))
+
+        # --- TYPE C EXIT TRIGGER ---
+        if pos.play_type == "C" and pos.change_pct is not None:
+            if pos.change_pct <= -5:
+                flags.append(PositionFlag(
+                    ticker=ticker,
+                    flag_type="exit_now",
+                    detail=f"Type C pozice −{abs(pos.change_pct):.1f}% intraday — exit pravidlo aktivováno.",
+                    urgency="high",
+                ))
+
+        # --- F&G TACTICAL SIGNAL ---
+        if market_context.fng_spike and pos.unrealized_pnl_pct >= 15:
+            flags.append(PositionFlag(
+                ticker=ticker,
+                flag_type="partial_profit",
+                detail=f"F&G spike detekován — pozice +{pos.unrealized_pnl_pct:.1f}%, zvažit parciální výběr zisku.",
+            ))
+
+        # --- NEWS ALERT (only for flagged positions) ---
+        if is_zombie or thesis_status in ("weakening",):
+            try:
+                news = await search(f"{ticker} stock news latest", max_results=2, days=7)
+                if news:
+                    snippet = news[0].get("title", "")[:100]
+                    flags.append(PositionFlag(
+                        ticker=ticker,
+                        flag_type="news_alert",
+                        detail=f"Poslední zprávy: {snippet}",
+                    ))
+            except Exception:
+                pass
+
+    return flags
+
+
+def _check_zombie(thesis_status: str, notes_log: list) -> bool:
+    if thesis_status == "zombie":
+        return True
+    if not notes_log:
+        return False
+    # Check if last note was > 60 days ago
+    try:
+        last_note = notes_log[-1]
+        ts = last_note.get("timestamp")
+        if ts:
+            last_update = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            if (datetime.now(timezone.utc) - last_update) > timedelta(days=60):
+                return True
+        # Check for zombie-like language in last note
+        text = last_note.get("text", "").lower()
+        zombie_phrases = ["zvažit exit", "zombie", "bez teze", "žádná teze", "waiting for", "no thesis"]
+        if any(p in text for p in zombie_phrases):
+            return True
+    except Exception:
+        pass
+    return False

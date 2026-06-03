@@ -1,0 +1,138 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@plugin "@tailwindcss/typography";
+
+@theme {
+  --font-mono: "Geist Mono", "JetBrains Mono", monospace;
+  --color-positive: #34d399;
+  --color-negative: #fb7185;
+  --color-warning: #fbbf24;
+}
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+}
+
+:root {
+  --radius: 1rem;
+  color-scheme: dark;
+  --background: #141719;
+  --foreground: #f5f1e8;
+  --card: rgba(22, 27, 30, 0.88);
+  --card-foreground: #f5f1e8;
+  --popover: #1b2226;
+  --popover-foreground: #f5f1e8;
+  --primary: #d3e97a;
+  --primary-foreground: #111413;
+  --secondary: rgba(255, 255, 255, 0.08);
+  --secondary-foreground: #f5f1e8;
+  --muted: rgba(255, 255, 255, 0.06);
+  --muted-foreground: #b8b0a3;
+  --accent: rgba(211, 233, 122, 0.14);
+  --accent-foreground: #edf6c6;
+  --destructive: #fb7185;
+  --border: rgba(255, 255, 255, 0.1);
+  --input: rgba(255, 255, 255, 0.1);
+  --ring: rgba(211, 233, 122, 0.55);
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    background-image:
+      radial-gradient(circle at top left, rgba(211, 233, 122, 0.16), transparent 28rem),
+      radial-gradient(circle at bottom right, rgba(96, 165, 250, 0.1), transparent 26rem),
+      linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 40%);
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    min-height: 100vh;
+  }
+
+  button,
+  input,
+  textarea {
+    font: inherit;
+  }
+}
+
+/* Report: single-row table → stat tiles */
+.report-content .report-table table:has(tbody > tr:only-child) {
+  border-collapse: separate;
+  border-spacing: 10px 0;
+  margin-left: -10px;
+}
+.report-content .report-table table:has(tbody > tr:only-child) th {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  font-weight: 500;
+  color: var(--muted-foreground);
+  padding: 0 4px 6px;
+  border-bottom: none;
+  white-space: nowrap;
+}
+.report-content .report-table table:has(tbody > tr:only-child) td {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  padding: 10px 14px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--foreground);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  white-space: nowrap;
+}
+.report-content .report-table table:has(tbody > tr:only-child) tr:hover td {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+@layer utilities {
+  .font-mono-price {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .text-positive {
+    color: var(--color-positive);
+  }
+
+  .text-negative {
+    color: var(--color-negative);
+  }
+
+  .bg-surface {
+    background-color: rgba(255, 255, 255, 0.04);
+  }
+
+  .ring-soft {
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
+  }
+}
