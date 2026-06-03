@@ -5,12 +5,13 @@ import {
   DashboardLoading,
   PendingRecommendationsBadge,
   ReportPanel,
+  RunIssuesPanel,
   RunSummaryCard,
 } from '@/components/dashboard';
+import { EmptyState } from '@/components/shared/empty-state';
 import { PageHeader } from '@/components/shared/page-header';
 import { PageShell } from '@/components/shared/page-shell';
 import { Button } from '@/components/ui/button';
-import { EmptyState } from '@/components/shared/empty-state';
 import { usePendingRecommendations } from '@/hooks/use-recommendations';
 import {
   isRunStillActive,
@@ -118,6 +119,11 @@ export function DashboardPage() {
       {!isLoading && !latestRunQuery.error && latestRun ? (
         <>
           <RunSummaryCard run={latestRun} />
+          <RunIssuesPanel
+            status={latestRun.status}
+            errorMessage={latestRun.error_message}
+            discoveryLog={runDetailQuery.data?.discovery_log ?? null}
+          />
           <ReportPanel reportContent={reportContent} />
         </>
       ) : null}

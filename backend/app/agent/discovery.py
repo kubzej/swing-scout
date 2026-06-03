@@ -417,7 +417,7 @@ News:
                 price_czk = price_usd * usd_czk
                 recommended_shares = int(size_czk / price_czk)
                 size_czk = round(recommended_shares * price_czk)
-                if reserve_pct > 0:
+                if reserve_czk > 0:
                     reserve_shares = int(reserve_czk / price_czk)
                     reserve_czk = round(reserve_shares * price_czk)
 

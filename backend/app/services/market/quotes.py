@@ -19,7 +19,10 @@ FX_TICKERS = {
     "USD_CZK": "USDCZK=X",
     "EUR_CZK": "EURCZK=X",
     "GBP_CZK": "GBPCZK=X",
-    "HKD_CZK": "HKDCZK=X",
+}
+
+FX_DERIVED_TICKERS = {
+    "USD_HKD": "USDHKD=X",
 }
 
 
@@ -149,7 +152,7 @@ async def get_fx_rates(redis) -> Dict[str, float]:
     }
 
     try:
-        symbols = list(FX_TICKERS.values())
+        symbols = list(FX_TICKERS.values()) + list(FX_DERIVED_TICKERS.values())
         df = yf.download(
             " ".join(symbols),
             period="2d",
@@ -159,11 +162,35 @@ async def get_fx_rates(redis) -> Dict[str, float]:
         )
         if not df.empty:
             for key, symbol in FX_TICKERS.items():
-                ticker_data = _normalize_ticker_data(df, symbol)
-                if ticker_data is not None and not ticker_data.empty and "Close" in ticker_data.columns:
-                    val = safe_float(ticker_data.dropna(subset=["Close"]).iloc[-1]["Close"])
+                try:
+                    ticker_data = _normalize_ticker_data(df, symbol)
+                    if ticker_data is None or ticker_data.empty or "Close" not in ticker_data.columns:
+                        continue
+                    close_series = ticker_data["Close"].dropna()
+                    if close_series.empty:
+                        continue
+                    val = safe_float(close_series.iloc[-1])
                     if val:
                         rates[key] = val
+                except Exception as e:
+                    logger.warning("FX ticker %s processing failed: %s", symbol, e)
+
+            # Yahoo often lacks a direct HKD/CZK quote. Derive it from USD/CZK and USD/HKD.
+            try:
+                usd_hkd_symbol = FX_DERIVED_TICKERS["USD_HKD"]
+                usd_hkd_data = _normalize_ticker_data(df, usd_hkd_symbol)
+                if (
+                    usd_hkd_data is not None
+                    and not usd_hkd_data.empty
+                    and "Close" in usd_hkd_data.columns
+                ):
+                    usd_hkd_close = usd_hkd_data["Close"].dropna()
+                    usd_hkd = safe_float(usd_hkd_close.iloc[-1]) if not usd_hkd_close.empty else None
+                    usd_czk = rates.get("USD_CZK")
+                    if usd_hkd and usd_hkd > 0 and usd_czk:
+                        rates["HKD_CZK"] = round(usd_czk / usd_hkd, 4)
+            except Exception as e:
+                logger.warning("Derived HKD_CZK calculation failed: %s", e)
     except Exception as e:
         logger.warning("FX rates fetch failed, using defaults: %s", e)
 

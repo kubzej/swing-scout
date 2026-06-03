@@ -1,5 +1,23 @@
 import { API_URL, getAuthHeader } from '@/lib/api/client';
 
+export interface RunIssue {
+  level: string;
+  source: string;
+  message: string;
+}
+
+export interface RunDiscoveryLog {
+  scanned_count?: number;
+  signal_tickers?: string[];
+  candidates_found?: number;
+  warnings_count?: number;
+  degraded_mode?: boolean;
+  warning_sources?: string[];
+  warnings?: RunIssue[];
+  failure_reason?: string | null;
+  failed_step?: string | null;
+}
+
 export interface RunSummary {
   id: string;
   run_type: 'daily' | 'intraday';
@@ -13,7 +31,7 @@ export interface RunSummary {
 
 export interface RunDetail extends RunSummary {
   report_content: string | null;
-  discovery_log: Record<string, unknown> | null;
+  discovery_log: RunDiscoveryLog | null;
 }
 
 export async function fetchRuns(params?: {
