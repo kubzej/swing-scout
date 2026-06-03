@@ -17,7 +17,7 @@ export function DiscoveryLogPanel({ latestRun, runDetail, loading }: DiscoveryLo
 
   return (
     <div className="flex items-center gap-3 text-xs text-muted-foreground">
-      <Badge variant="outline" className="text-[10px]">{latestRun.status}</Badge>
+      <Badge className="text-[10px]">{latestRun.status}</Badge>
       <span>
         Poslední run {formatDateTime(latestRun.started_at)}
         {scanned != null ? ` · ${scanned} tickerů` : ''}

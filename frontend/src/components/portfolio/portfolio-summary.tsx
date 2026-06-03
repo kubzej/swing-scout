@@ -6,7 +6,6 @@ interface PortfolioSummaryProps {
   totalPnlCzk: number;
   totalPnlPct: number | null;
   cashCzk: number;
-  totalReturnPct: number | null;
   totalRealizedPnlCzk: number;
 }
 
@@ -16,7 +15,6 @@ export function PortfolioSummary({
   totalPnlCzk,
   totalPnlPct,
   cashCzk,
-  totalReturnPct,
   totalRealizedPnlCzk,
 }: PortfolioSummaryProps) {
   return (

@@ -1,5 +1,5 @@
 import type { TransactionRecord } from '@/lib/api/transactions';
-import { formatCurrency, formatCzk, formatDateTime, formatPercent } from '@/lib/format';
+import { formatCurrency, formatCzk, formatDateTime } from '@/lib/format';
 
 interface TransactionHistoryProps {
   transactions: TransactionRecord[];
