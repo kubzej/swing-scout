@@ -5,7 +5,7 @@ import { ThesisStrategySection } from '@/components/portfolio/thesis-strategy-se
 import { ThesisStatusBadge } from '@/components/portfolio/thesis-status-badge';
 import { Button } from '@/components/ui/button';
 import type { PortfolioPosition } from '@/lib/api/portfolio';
-import { getDisplayNotes, getLatestStrategySnapshot, type ThesisResponse } from '@/lib/api/theses';
+import type { ThesisResponse } from '@/lib/api/theses';
 import { formatCurrency, formatCzk, formatDateTime, formatPercent } from '@/lib/format';
 
 interface ThesisSheetProps {
@@ -20,8 +20,6 @@ export function ThesisSheet({ open, position, thesis, loading, onClose }: Thesis
   if (!open || !position) return null;
 
   const pnlPositive = (position.unrealized_pnl_czk ?? 0) >= 0;
-  const displayNotes = thesis ? getDisplayNotes(thesis.notes_log) : [];
-  const strategy = thesis ? getLatestStrategySnapshot(thesis.notes_log) : null;
 
   return (
     <div className="fixed inset-0 z-40 flex justify-end bg-black/55 backdrop-blur-sm">
@@ -63,25 +61,49 @@ export function ThesisSheet({ open, position, thesis, loading, onClose }: Thesis
           ) : thesis ? (
             <>
               <Section label="Teze" text={thesis.entry_thesis} />
-              {strategy ? <ThesisStrategySection strategy={strategy} /> : null}
-              {!strategy && thesis.exit_conditions ? (
-                <Section label="Exit podmínky" text={thesis.exit_conditions} />
-              ) : null}
-              {!strategy && thesis.horizon ? (
-                <Section label="Horizont" text={thesis.horizon} />
+
+              <ThesisStrategySection thesis={thesis} />
+
+              {thesis.last_thesis_check_summary ? (
+                <div className="rounded-xl border border-border/50 bg-white/[0.02] px-4 py-3 space-y-1">
+                  <div className="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
+                    Poslední denní check
+                  </div>
+                  <p className="text-sm leading-relaxed text-foreground/90">
+                    {thesis.last_thesis_check_summary}
+                  </p>
+                  {thesis.last_thesis_check_at ? (
+                    <p className="text-xs text-muted-foreground/60">
+                      {formatDateTime(thesis.last_thesis_check_at)}
+                      {thesis.last_thesis_check_action_bias
+                        ? ` · ${thesis.last_thesis_check_action_bias}`
+                        : null}
+                    </p>
+                  ) : null}
+                </div>
               ) : null}
 
-              {displayNotes.length > 0 ? (
+              {thesis.events.length > 0 ? (
                 <div>
                   <div className="mb-2 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
-                    Poznámky
+                    Historie
                   </div>
                   <div className="space-y-2">
-                    {displayNotes.map((note, i) => (
-                      <div key={`${note.timestamp}-${i}`} className="border-l-2 border-border pl-3">
-                        <p className="text-sm text-foreground">{note.text}</p>
+                    {thesis.events.map((event) => (
+                      <div key={event.id} className="border-l-2 border-border pl-3">
+                        <div className="flex items-center gap-2">
+                          <EventKindBadge kind={event.kind} />
+                          {event.status_before !== event.status_after && event.status_after ? (
+                            <span className="text-[10px] text-muted-foreground/60">
+                              → {event.status_after}
+                            </span>
+                          ) : null}
+                        </div>
+                        {event.text ? (
+                          <p className="mt-0.5 text-sm text-foreground/80">{event.text}</p>
+                        ) : null}
                         <p className="mt-0.5 text-xs text-muted-foreground/60">
-                          {formatDateTime(note.timestamp)}
+                          {formatDateTime(event.created_at)}
                         </p>
                       </div>
                     ))}
@@ -115,5 +137,25 @@ function Section({ label, text }: { label: string; text: string }) {
       <div className="mb-1 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">{label}</div>
       <p className="text-sm leading-relaxed text-foreground/90">{text}</p>
     </div>
+  );
+}
+
+const KIND_LABELS: Record<string, string> = {
+  opened: 'Otevřeno',
+  scaled: 'Přikoupeno',
+  manual_scaled: 'Ruční přikoupení',
+  partial_exit: 'Částečný výstup',
+  manual_partial_exit: 'Ruční část. výstup',
+  closed: 'Uzavřeno',
+  daily_check: 'Denní check',
+  manual_update: 'Ruční aktualizace',
+  status_change: 'Změna statusu',
+};
+
+function EventKindBadge({ kind }: { kind: string }) {
+  return (
+    <span className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground font-medium">
+      {KIND_LABELS[kind] ?? kind}
+    </span>
   );
 }

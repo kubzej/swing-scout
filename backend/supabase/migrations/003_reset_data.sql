@@ -2,6 +2,7 @@
 -- Order respects FK constraints.
 
 TRUNCATE TABLE transactions CASCADE;
+TRUNCATE TABLE thesis_events CASCADE;
 TRUNCATE TABLE theses CASCADE;
 TRUNCATE TABLE recommendations CASCADE;
 TRUNCATE TABLE positions CASCADE;

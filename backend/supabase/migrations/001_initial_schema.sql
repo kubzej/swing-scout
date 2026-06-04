@@ -36,18 +36,48 @@ CREATE TABLE positions (
 -- ============================================================
 CREATE TABLE theses (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  position_id UUID REFERENCES positions(id) ON DELETE CASCADE,
+  position_id UUID UNIQUE REFERENCES positions(id) ON DELETE CASCADE,
   user_id UUID NOT NULL REFERENCES auth.users(id),
   ticker TEXT NOT NULL,
-  entry_thesis TEXT NOT NULL,
-  exit_conditions TEXT,
-  horizon TEXT,
   play_type TEXT NOT NULL CHECK (play_type IN ('A', 'B', 'C')),
   status TEXT NOT NULL DEFAULT 'intact'
     CHECK (status IN ('intact', 'weakening', 'zombie', 'invalidated', 'delivered')),
-  notes_log JSONB NOT NULL DEFAULT '[]',
+  -- original reason
+  entry_thesis TEXT NOT NULL,
+  entry_rationale TEXT,
+  -- current plan
+  invalidation_conditions TEXT,
+  profit_taking_plan TEXT,
+  monitoring_focus TEXT,
+  holding_horizon TEXT,
+  add_plan TEXT,
+  exit_plan TEXT,
+  -- source
+  source_recommendation_id UUID REFERENCES recommendations(id),
+  -- last check cache
+  last_thesis_check_at TIMESTAMPTZ,
+  last_thesis_check_summary TEXT,
+  last_thesis_check_action_bias TEXT,
+  last_thesis_check_urgency TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ============================================================
+-- THESIS_EVENTS
+-- ============================================================
+CREATE TABLE thesis_events (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  thesis_id UUID NOT NULL REFERENCES theses(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES auth.users(id),
+  position_id UUID REFERENCES positions(id) ON DELETE CASCADE,
+  ticker TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  text TEXT,
+  payload JSONB NOT NULL DEFAULT '{}',
+  status_before TEXT,
+  status_after TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- ============================================================
@@ -141,6 +171,7 @@ CREATE TABLE agent_watchlist (
 ALTER TABLE settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE positions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE theses ENABLE ROW LEVEL SECURITY;
+ALTER TABLE thesis_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE daily_runs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE recommendations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE transactions ENABLE ROW LEVEL SECURITY;
@@ -152,6 +183,8 @@ ALTER TABLE agent_watchlist ENABLE ROW LEVEL SECURITY;
 CREATE INDEX idx_positions_user_status ON positions(user_id, status);
 CREATE INDEX idx_theses_position ON theses(position_id);
 CREATE INDEX idx_theses_user_ticker ON theses(user_id, ticker);
+CREATE INDEX idx_thesis_events_thesis_created ON thesis_events(thesis_id, created_at DESC);
+CREATE INDEX idx_thesis_events_user_ticker_created ON thesis_events(user_id, ticker, created_at DESC);
 CREATE INDEX idx_recommendations_user_status ON recommendations(user_id, status, created_at DESC);
 CREATE INDEX idx_transactions_user ON transactions(user_id, executed_at DESC);
 CREATE INDEX idx_daily_runs_user_type ON daily_runs(user_id, run_type, started_at DESC);

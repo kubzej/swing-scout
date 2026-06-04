@@ -2,7 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.core.auth import get_current_user_id
 from app.core.supabase import get_supabase
 from app.core.redis import get_redis
-from app.services.market.quotes import get_fx_rates, get_fx_rate, to_czk
+from app.services.market.quotes import get_fx_rates, get_fx_rate
+from app.services.thesis_service import create_thesis_event, get_current_thesis
 from pydantic import BaseModel, model_validator
 from typing import Optional
 from datetime import datetime, timezone
@@ -19,23 +20,6 @@ def _with_source_run_type(rows: list[dict] | None) -> list[dict]:
         item["source_run_type"] = "daily" if item.get("run_id") else "intraday"
         enriched.append(item)
     return enriched
-
-
-def _build_strategy_snapshot_note(*, invalidation: Optional[str], profit_plan: Optional[str], horizon: Optional[str], monitoring_focus: Optional[str], source_run_type: str) -> dict:
-    return {
-        "kind": "strategy_snapshot",
-        "text": "Strategie při otevření pozice uložena.",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "status_before": None,
-        "status_after": "intact",
-        "strategy": {
-            "invalidation_conditions": invalidation,
-            "profit_taking_plan": profit_plan,
-            "holding_horizon": horizon,
-            "monitoring_focus": monitoring_focus,
-            "source_run_type": source_run_type,
-        },
-    }
 
 
 class ConfirmRequest(BaseModel):
@@ -89,7 +73,6 @@ async def list_recommendations(
         .limit(limit)
     )
     if status != "all":
-        # Support comma-separated statuses: "pending,updated"
         statuses = [s.strip() for s in status.split(",")]
         if len(statuses) == 1:
             query = query.eq("status", statuses[0])
@@ -126,7 +109,6 @@ async def confirm_recommendation(
     ticker = r["ticker"]
     from app.api.endpoints.transactions import _upsert_position
 
-    # --- Execute trade first, mark confirmed only on success ---
     if action in ("buy", "add", "sell", "exit"):
         fx = await get_fx_rates(redis)
         size_czk = r.get("recommended_size_czk") or 0
@@ -185,7 +167,7 @@ async def confirm_recommendation(
             logger.error("Transaction insert failed for rec %s: %s", rec_id, e)
             raise HTTPException(status_code=500, detail="Nepodařilo se vytvořit transakci")
 
-        # Create thesis on new buy
+        # --- Thesis v2 write ---
         if action in ("buy", "add") and r.get("thesis_text"):
             try:
                 pos_after = (
@@ -195,50 +177,141 @@ async def confirm_recommendation(
                 )
                 if pos_after.data:
                     position_id = pos_after.data[0]["id"]
-                    existing = db.table("theses").select("id").eq("position_id", position_id).eq("user_id", user_id).execute()
-                    if not existing.data:
-                        invalidation = rec_opts.get("invalidation_conditions")
-                        profit_plan = rec_opts.get("profit_taking_plan")
-                        monitoring_focus = rec_opts.get("monitoring_focus")
-                        horizon = rec_opts.get("holding_horizon")
-                        combined_exit = "\n".join(
-                            part for part in [
-                                f"Invalidační podmínky: {invalidation}" if invalidation else None,
-                                f"Výběr zisků: {profit_plan}" if profit_plan else None,
-                                f"Monitoring: {monitoring_focus}" if monitoring_focus else None,
-                            ] if part
-                        ) or r.get("exit_conditions")
-                        notes_log = [
-                            _build_strategy_snapshot_note(
-                                invalidation=invalidation,
-                                profit_plan=profit_plan,
-                                horizon=horizon,
-                                monitoring_focus=monitoring_focus,
-                                source_run_type="daily" if r.get("run_id") else "intraday",
-                            )
-                        ]
-                        db.table("theses").insert({
+                    existing_thesis = get_current_thesis(db, user_id, position_id)
+
+                    if not existing_thesis:
+                        # New position — create thesis with first-class fields
+                        thesis_payload = {
                             "user_id": user_id,
                             "position_id": position_id,
                             "ticker": ticker,
                             "entry_thesis": r["thesis_text"],
-                            "exit_conditions": combined_exit,
-                            "horizon": horizon,
+                            "entry_rationale": rec_opts.get("entry_rationale"),
+                            "invalidation_conditions": rec_opts.get("invalidation_conditions"),
+                            "profit_taking_plan": rec_opts.get("profit_taking_plan"),
+                            "monitoring_focus": rec_opts.get("monitoring_focus"),
+                            "holding_horizon": rec_opts.get("holding_horizon"),
+                            "add_plan": _build_add_plan(r),
+                            "exit_plan": rec_opts.get("exit_plan"),
                             "play_type": r.get("play_type", "A"),
+                            "source_recommendation_id": rec_id,
                             "status": "intact",
-                            "notes_log": notes_log,
-                        }).execute()
-            except Exception as e:
-                logger.warning("Thesis creation failed for %s: %s", ticker, e)
+                        }
+                        thesis_response = db.table("theses").insert(thesis_payload).execute()
+                        if thesis_response.data:
+                            new_thesis = thesis_response.data[0]
+                            create_thesis_event(
+                                db,
+                                thesis=new_thesis,
+                                kind="opened",
+                                text=f"Pozice otevřena: {r['thesis_text'][:300]}",
+                                payload={
+                                    "recommendation_id": rec_id,
+                                    "action": action,
+                                    "price": data.actual_price,
+                                    "shares": shares,
+                                    "size_czk": actual_size_czk,
+                                    "currency": currency,
+                                    "source": "daily" if r.get("run_id") else "intraday",
+                                },
+                                status_before=None,
+                                status_after="intact",
+                            )
+                    else:
+                        # Existing position — update strategy fields if recommendation has newer values
+                        update_fields: dict = {"updated_at": datetime.now(timezone.utc).isoformat()}
+                        for field in ("invalidation_conditions", "profit_taking_plan", "monitoring_focus", "holding_horizon"):
+                            new_val = rec_opts.get(field)
+                            if new_val and new_val.strip():
+                                update_fields[field] = new_val
+                        if len(update_fields) > 1:
+                            db.table("theses").update(update_fields).eq("id", existing_thesis["id"]).execute()
+                            existing_thesis.update(update_fields)
 
-    # Mark confirmed only after successful trade execution
+                        create_thesis_event(
+                            db,
+                            thesis=existing_thesis,
+                            kind="scaled",
+                            text=f"Přikoupení potvrzeno: {r.get('thesis_text', '')[:300]}",
+                            payload={
+                                "recommendation_id": rec_id,
+                                "action": action,
+                                "price": data.actual_price,
+                                "shares": shares,
+                                "size_czk": actual_size_czk,
+                                "currency": currency,
+                                "source": "daily" if r.get("run_id") else "intraday",
+                                "strategy_at_add": {
+                                    "invalidation_conditions": rec_opts.get("invalidation_conditions"),
+                                    "profit_taking_plan": rec_opts.get("profit_taking_plan"),
+                                    "holding_horizon": rec_opts.get("holding_horizon"),
+                                    "monitoring_focus": rec_opts.get("monitoring_focus"),
+                                    "entry_rationale": rec_opts.get("entry_rationale"),
+                                },
+                            },
+                            status_before=existing_thesis.get("status", "intact"),
+                            status_after=existing_thesis.get("status", "intact"),
+                        )
+            except Exception as e:
+                logger.warning("Thesis create/update failed for %s: %s", ticker, e)
+
+        elif action in ("sell", "exit"):
+            try:
+                # Find thesis for current (or just-closed) position
+                pos_for_thesis = (
+                    db.table("positions").select("id, status")
+                    .eq("user_id", user_id).eq("ticker", ticker)
+                    .order("created_at", desc=True).limit(1)
+                    .execute()
+                )
+                if pos_for_thesis.data:
+                    position_id = pos_for_thesis.data[0]["id"]
+                    thesis = get_current_thesis(db, user_id, position_id)
+                    if not thesis:
+                        # Try without user_id filter (position might be closed)
+                        thesis_resp = (
+                            db.table("theses").select("*")
+                            .eq("position_id", position_id).eq("user_id", user_id)
+                            .execute()
+                        )
+                        thesis = thesis_resp.data[0] if thesis_resp.data else None
+
+                    if thesis:
+                        pos_after = (
+                            db.table("positions").select("status")
+                            .eq("id", position_id).execute()
+                        )
+                        is_closed = (
+                            not pos_after.data or
+                            pos_after.data[0].get("status") == "closed" or
+                            action == "exit"
+                        )
+                        create_thesis_event(
+                            db,
+                            thesis=thesis,
+                            kind="closed" if is_closed else "partial_exit",
+                            text=f"{'Pozice uzavřena' if is_closed else 'Částečný výstup'}: {r.get('thesis_text', '')[:200]}",
+                            payload={
+                                "recommendation_id": rec_id,
+                                "action": action,
+                                "price": data.actual_price,
+                                "shares": shares,
+                                "size_czk": actual_size_czk,
+                                "currency": currency,
+                                "realized_pnl_czk": realized_pnl_czk,
+                            },
+                            status_before=thesis.get("status", "intact"),
+                            status_after=thesis.get("status", "intact"),
+                        )
+            except Exception as e:
+                logger.warning("Thesis exit event failed for %s: %s", ticker, e)
+
     db.table("recommendations").update({
         "status": "confirmed",
         "actual_price": data.actual_price,
         "confirmed_at": datetime.now(timezone.utc).isoformat(),
     }).eq("id", rec_id).execute()
 
-    # Remove from watchlist: buy/add = ticker is now in portfolio
     if action in ("buy", "add"):
         try:
             from app.agent.watchlist_manager import remove_from_watchlist
@@ -247,6 +320,13 @@ async def confirm_recommendation(
             logger.warning("Watchlist cleanup failed for %s: %s", ticker, e)
 
     return {"status": "confirmed", "rec_id": rec_id}
+
+
+def _build_add_plan(rec: dict) -> Optional[str]:
+    reserve = rec.get("add_reserve_czk")
+    if reserve and float(reserve) > 0:
+        return f"Rezerva na přikoupení: {int(reserve):,} CZK"
+    return None
 
 
 @router.post("/{rec_id}/reject")
@@ -277,7 +357,6 @@ async def reject_recommendation(
         "rejected_at": datetime.now(timezone.utc).isoformat(),
     }).eq("id", rec_id).execute()
 
-    # Remove from watchlist on reject — agent re-adds if signal returns
     if ticker:
         try:
             from app.agent.watchlist_manager import remove_from_watchlist

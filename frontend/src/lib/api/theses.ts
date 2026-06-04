@@ -1,57 +1,42 @@
 import { API_URL, getAuthHeader } from '@/lib/api/client';
 
-export interface ThesisNote {
-  text: string;
-  timestamp: string;
-  status_before?: string | null;
-  status_after?: string | null;
-  kind?: string | null;
-  strategy?: {
-    invalidation_conditions?: string | null;
-    profit_taking_plan?: string | null;
-    holding_horizon?: string | null;
-    monitoring_focus?: string | null;
-    source_run_type?: string | null;
-  } | null;
-}
-
-export interface ThesisStrategySnapshot {
-  invalidation_conditions?: string | null;
-  profit_taking_plan?: string | null;
-  holding_horizon?: string | null;
-  monitoring_focus?: string | null;
-  source_run_type?: string | null;
+export interface ThesisEvent {
+  id: string;
+  thesis_id: string;
+  user_id: string;
+  position_id: string | null;
+  ticker: string;
+  kind: string;
+  text: string | null;
+  payload: Record<string, unknown>;
+  status_before: string | null;
+  status_after: string | null;
+  created_at: string;
 }
 
 export interface ThesisResponse {
   id: string;
   position_id: string;
+  user_id: string;
   ticker: string;
-  entry_thesis: string;
-  exit_conditions: string;
-  horizon: string;
   play_type: 'A' | 'B' | 'C';
   status: string;
-  notes_log: ThesisNote[];
+  entry_thesis: string;
+  entry_rationale: string | null;
+  invalidation_conditions: string | null;
+  profit_taking_plan: string | null;
+  monitoring_focus: string | null;
+  holding_horizon: string | null;
+  add_plan: string | null;
+  exit_plan: string | null;
+  source_recommendation_id: string | null;
+  last_thesis_check_at: string | null;
+  last_thesis_check_summary: string | null;
+  last_thesis_check_action_bias: string | null;
+  last_thesis_check_urgency: string | null;
   created_at: string;
   updated_at: string | null;
-}
-
-function parseNotesLog(value: unknown): ThesisNote[] {
-  if (Array.isArray(value)) {
-    return value as ThesisNote[];
-  }
-
-  if (typeof value === 'string') {
-    try {
-      const parsed = JSON.parse(value);
-      return Array.isArray(parsed) ? (parsed as ThesisNote[]) : [];
-    } catch {
-      return [];
-    }
-  }
-
-  return [];
+  events: ThesisEvent[];
 }
 
 export async function fetchThesis(positionId: string): Promise<ThesisResponse | null> {
@@ -66,27 +51,5 @@ export async function fetchThesis(positionId: string): Promise<ThesisResponse | 
     throw new Error('Nepodařilo se načíst thesis detail.');
   }
 
-  const thesis = (await response.json()) as Omit<ThesisResponse, 'notes_log'> & {
-    notes_log: unknown;
-  };
-
-  return {
-    ...thesis,
-    notes_log: parseNotesLog(thesis.notes_log),
-  };
-}
-
-export function getLatestStrategySnapshot(notes: ThesisNote[]): ThesisStrategySnapshot | null {
-  for (let index = notes.length - 1; index >= 0; index -= 1) {
-    const note = notes[index];
-    if (note.kind === 'strategy_snapshot' && note.strategy) {
-      return note.strategy;
-    }
-  }
-
-  return null;
-}
-
-export function getDisplayNotes(notes: ThesisNote[]): ThesisNote[] {
-  return notes.filter((note) => note.kind !== 'strategy_snapshot');
+  return response.json() as Promise<ThesisResponse>;
 }

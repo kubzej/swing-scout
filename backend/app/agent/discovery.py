@@ -170,6 +170,13 @@ Pravidla pro exit podle typu hry:
 - Type B: hlavní osa je catalyst played out / catalyst failed / time condition.
 - Type C: hlavní osa je aktivní staged profit-taking + rychlá invalidace při ztrátě momentum.
 
+Pravidla pro nákup:
+- Signal není nákup. Nákup doporuč jen pokud je jasné proč právě teď otevřít pozici.
+- Pokud chybí konkrétní teze, catalyst, entry rationale nebo invalidace, vrať {"skip": true}.
+- Velký denní pokles není sám o sobě dip-buy. Musí být jasné, proč pokles nerozbíjí tezi.
+- Velký denní růst není sám o sobě momentum-buy. Nesmí to být jen chasing po hot news.
+- Pokud je lepší akcii jen sledovat nebo počkat na další potvrzení, vrať {"skip": true}.
+
 KRITICKÉ:
 - Vrať POUZE jeden JSON objekt.
 - Bez markdownu, bez code fence, bez vysvětlení před ani po JSON.
@@ -446,7 +453,19 @@ async def run_deep_filter_with_diagnostics(
     user_id: str,
 ) -> tuple[List[Candidate], dict[str, Any]]:
     """Stage 2 — filter top 15 signals to 5-10 actionable candidates with thesis."""
-    top_signals = sorted(signals, key=lambda s: s.signal_score, reverse=True)[:15]
+    top_discovery_signals = [
+        signal for signal in sorted(signals, key=lambda s: s.signal_score, reverse=True)
+        if not signal.signal_type.startswith("watchlist_")
+    ][:15]
+    watchlist_signals = [
+        signal for signal in signals
+        if signal.signal_type.startswith("watchlist_")
+    ]
+    seen_tickers = {signal.ticker for signal in top_discovery_signals}
+    top_signals = top_discovery_signals + [
+        signal for signal in watchlist_signals
+        if signal.ticker not in seen_tickers
+    ]
     held = {p.ticker for p in portfolio.positions}
 
     from app.services.portfolio_service import get_settings
@@ -472,7 +491,7 @@ async def run_deep_filter_with_diagnostics(
         "held_skipped": 0,
         "invalid_stock_skipped": 0,
         "llm_skip": 0,
-        "bear_regime_skipped": 0,
+        "low_confidence_skipped": 0,
         "exception_skipped": 0,
         "watchlist_adds": 0,
         "candidates_found": 0,
@@ -565,26 +584,26 @@ News:
             confidence = classification.get("confidence", 2)
             play_type = classification.get("play_type", "A")
 
-            if bear_regime and confidence <= 1:
-                diagnostics['bear_regime_skipped'] += 1
-                record_rejection('bear_regime_low_confidence', ticker, f'confidence={confidence}')
-                log_event(logger, logging.INFO, 'stage2_ticker_skipped', ticker=ticker, reason='bear_regime_low_confidence', confidence=confidence)
+            if confidence <= 1:
+                diagnostics['low_confidence_skipped'] += 1
+                record_rejection('low_confidence_watchlist_only', ticker, f'confidence={confidence}')
+                log_event(logger, logging.INFO, 'stage2_ticker_skipped', ticker=ticker, reason='low_confidence_watchlist_only', confidence=confidence)
                 watchlist_adds.append({
                     "ticker": ticker,
-                    "stage": "candidate",
-                    "signal_reason": f"Bear regime — confidence je příliš nízká. {sig.signal_reason}",
+                    "stage": "watching",
+                    "signal_reason": f"Nízká confidence — jen sledovat. {sig.signal_reason}",
                     "theme": fundamentals.get("sector"),
                 })
                 continue
 
-            if bear_regime and play_type == "C" and confidence < 3:
-                diagnostics['bear_regime_skipped'] += 1
-                record_rejection('bear_regime_momentum', ticker, f'confidence={confidence}')
-                log_event(logger, logging.INFO, 'stage2_ticker_skipped', ticker=ticker, reason='bear_regime_momentum', confidence=confidence)
+            if play_type == "C" and confidence < 3:
+                diagnostics['low_confidence_skipped'] += 1
+                record_rejection('weak_momentum_watchlist_only', ticker, f'confidence={confidence}')
+                log_event(logger, logging.INFO, 'stage2_ticker_skipped', ticker=ticker, reason='weak_momentum_watchlist_only', confidence=confidence)
                 watchlist_adds.append({
                     "ticker": ticker,
-                    "stage": "candidate",
-                    "signal_reason": f"Bear regime — momentum setup bez dost silné confidence. {sig.signal_reason}",
+                    "stage": "watching",
+                    "signal_reason": f"Momentum setup není dost silný pro nákup. {sig.signal_reason}",
                     "theme": fundamentals.get("sector"),
                 })
                 continue

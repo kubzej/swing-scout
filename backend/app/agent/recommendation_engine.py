@@ -31,6 +31,7 @@ def build_recommendations_with_diagnostics(
     max_positions = settings.get("max_positions", 20)
     cash_reserve_pct = float(settings.get("cash_reserve_pct", 0.07))
     recently_rejected = _load_recently_rejected(db, user_id)
+    active_entry_recommendations = _load_active_entry_recommendations(db, user_id)
 
     n_positions = len(portfolio.positions)
     portfolio_full = n_positions >= max_positions
@@ -54,6 +55,7 @@ def build_recommendations_with_diagnostics(
         "position_flags_in": len(flags),
         "recommendations_out": 0,
         "recently_rejected_skipped": 0,
+        "active_entry_recommendation_skipped": 0,
         "portfolio_full_skipped": 0,
         "insufficient_cash_skipped": 0,
         "rotation_recommendations": 0,
@@ -82,6 +84,12 @@ def build_recommendations_with_diagnostics(
             logger.info('Skipping %s — recently rejected (soft)', ticker)
             record_skip('recently_rejected', ticker)
             log_event(logger, logging.INFO, 'recommendation_candidate_skipped', ticker=ticker, reason='recently_rejected')
+            continue
+
+        if ticker in active_entry_recommendations:
+            logger.info('Skipping %s — active entry recommendation already exists', ticker)
+            record_skip('active_entry_recommendation', ticker)
+            log_event(logger, logging.INFO, 'recommendation_candidate_skipped', ticker=ticker, reason='active_entry_recommendation')
             continue
 
         if portfolio_full:
@@ -156,6 +164,13 @@ def build_recommendations_with_diagnostics(
             continue
 
         if flag.flag_type == "add_trigger" and available_cash >= 15000:
+            if flag.ticker in active_entry_recommendations:
+                logger.info('Skipping %s add flag — active entry recommendation already exists', flag.ticker)
+                record_skip('active_entry_recommendation', flag.ticker, 'add_flag')
+                log_event(logger, logging.INFO, 'recommendation_flag_skipped', ticker=flag.ticker, flag_type=flag.flag_type, reason='active_entry_recommendation')
+                continue
+
+            thesis_snapshot = _load_thesis_snapshot(db, user_id, pos.id)
             recommendations.append({
                 "ticker": flag.ticker,
                 "action": "add",
@@ -164,10 +179,15 @@ def build_recommendations_with_diagnostics(
                 "recommended_price": None,
                 "recommended_size_czk": 17000,
                 "add_reserve_czk": 0,
-                "thesis_text": f"Dip add — pozice {pos.unrealized_pnl_pct:.1f}% při intaktní tezi.",
+                "thesis_text": flag.detail,
                 "exit_conditions": "Stejné jako původní thesis.",
                 "is_options_play": False,
-                "options_details": None,
+                "options_details": {
+                    "source": "daily_position_monitor",
+                    "flag_type": flag.flag_type,
+                    "current_pnl_pct": pos.unrealized_pnl_pct,
+                    "source_thesis_snapshot": thesis_snapshot,
+                },
             })
             diagnostics["flag_recommendations"] += 1
             available_cash -= 17000
@@ -267,6 +287,18 @@ def _load_recently_rejected(db, user_id: str) -> set:
     return {r["ticker"] for r in (response.data or [])}
 
 
+def _load_active_entry_recommendations(db, user_id: str) -> set:
+    response = (
+        db.table("recommendations")
+        .select("ticker")
+        .eq("user_id", user_id)
+        .in_("status", ["pending", "updated"])
+        .in_("action", ["buy", "add", "csp", "long_call"])
+        .execute()
+    )
+    return {r["ticker"] for r in (response.data or [])}
+
+
 def _find_rotation_candidate(portfolio: PortfolioSnapshot, flags: List[PositionFlag]) -> Optional[dict]:
     """Prefer zombie/delivered positions over generic profitable winners for rotation."""
     positions_by_ticker = {pos.ticker: pos for pos in portfolio.positions}
@@ -343,5 +375,20 @@ def _get_watchlist_age(db, user_id: str, ticker: str) -> Optional[int]:
             response.data[0]["first_seen_at"].replace("Z", "+00:00")
         )
         return (datetime.now(timezone.utc) - first_seen).days
+    except Exception:
+        return None
+
+
+def _load_thesis_snapshot(db, user_id: str, position_id: str) -> Optional[dict]:
+    """Load current thesis fields for an add recommendation's context."""
+    try:
+        response = (
+            db.table("theses")
+            .select("invalidation_conditions, profit_taking_plan, monitoring_focus, holding_horizon, entry_thesis, status")
+            .eq("user_id", user_id)
+            .eq("position_id", position_id)
+            .execute()
+        )
+        return response.data[0] if response.data else None
     except Exception:
         return None

@@ -2,19 +2,23 @@
 Daily run — orchestrates the full daily flow.
 Creates a daily_runs record, runs all agent steps, saves results.
 """
+import json
 import logging
+import re
 from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any
 
-from app.agent.discovery import run_deep_filter_with_diagnostics, run_signal_scan
+from app.ai.client import call_llm
+from app.agent.discovery import SignalTicker, run_deep_filter_with_diagnostics, run_signal_scan
 from app.agent.position_monitor import monitor_positions
 from app.agent.recommendation_engine import build_recommendations_with_diagnostics
 from app.agent.report_generator import generate_report
-from app.agent.watchlist_manager import cleanup_stale
+from app.agent.watchlist_manager import cleanup_stale, get_active_watchlist
 from app.core.redis import get_redis
 from app.core.run_logging import bind_run_context, log_event, reset_run_context
 from app.core.supabase import get_supabase
+from app.search.client import format_results, search
 from app.services.market.market_context import get_market_context
 from app.services.portfolio_service import get_portfolio_snapshot
 
@@ -32,6 +36,24 @@ CURRENCY_SYMBOL = {
     "SEK": "kr",
     "PLN": "zł",
 }
+
+PENDING_RECOMMENDATION_REVIEW_PROMPT = """Jsi daily re-check pro čekající swing doporučení.
+Vyhodnoť, jestli původní doporučení stále dává smysl.
+
+Vrať POUZE JSON:
+{
+  "status": "keep|update|reject",
+  "thesis_risk": "low|medium|high",
+  "summary": "jedna krátká věta česky",
+  "price_note": "krátká poznámka k ceně nebo null"
+}
+
+Pravidla:
+- Pending doporučení není pozice. Cílem je zabránit nákupu staré nebo rozbité teze.
+- Reject pokud čerstvý kontext rozbíjí tezi, catalyst selhal, vstup je jen chasing, nebo původní důvod nákupu už neplatí.
+- Update pokud teze stále může platit, ale cena/kontext významně mění timing, risk/reward nebo vyžaduje pozornost uživatele.
+- Keep pouze pokud původní teze a entry rationale stále drží.
+- Cena sama o sobě nestačí. Vždy ji posuzuj proti tezi a čerstvému kontextu."""
 
 
 class RunIssueCollector(logging.Handler):
@@ -172,7 +194,8 @@ async def run_daily(user_id: str) -> str:
         logger.info('Running discovery Stage 1...')
         stage_started = perf_counter()
         signals = await run_signal_scan(redis)
-        log_event(logger, logging.INFO, 'stage_completed', stage='discovery_stage_1', duration_ms=round((perf_counter() - stage_started) * 1000), signals=len(signals))
+        signals, watchlist_signal_count = await _merge_watchlist_signals(user_id, signals)
+        log_event(logger, logging.INFO, 'stage_completed', stage='discovery_stage_1', duration_ms=round((perf_counter() - stage_started) * 1000), signals=len(signals), watchlist_signals=watchlist_signal_count)
 
         step = 'discovery stage 2'
         logger.info('Running discovery Stage 2 (%d signals)...', len(signals))
@@ -281,14 +304,16 @@ async def run_daily(user_id: str) -> str:
 
 
 async def _reevaluate_pending(db, redis, user_id: str):
-    """Re-evaluate pending recommendations — flag if price changed materially."""
+    """Re-evaluate pending/updated recommendations against price and thesis context."""
     from app.services.market.quotes import get_quotes
 
     pending = (
         db.table('recommendations')
-        .select('id, ticker, recommended_price, action, options_details')
+        .select('id, ticker, action, play_type, confidence, recommended_price, thesis_text, exit_conditions, options_details, status, created_at, price_update_note')
         .eq('user_id', user_id)
-        .eq('status', 'pending')
+        .in_('status', ['pending', 'updated'])
+        .order('created_at', desc=False)
+        .limit(30)
         .execute()
     )
     if not pending.data:
@@ -305,20 +330,191 @@ async def _reevaluate_pending(db, redis, user_id: str):
         currency = str(options_details.get('currency') or 'USD').upper()
         symbol = CURRENCY_SYMBOL.get(currency, f"{currency} ")
 
-        if not current_price or not rec_price:
+        if not current_price:
             continue
 
-        change = abs(current_price - rec_price) / rec_price * 100
-        if change >= 5:
-            direction = 'vzrostla' if current_price > rec_price else 'klesla'
-            note = (
-                f"Cena {direction} o {change:.1f}% od doporučení "
-                f"({symbol}{rec_price:.2f} → {symbol}{current_price:.2f})"
-            )
+        change = _price_change_pct(rec_price, current_price)
+        action = rec.get('action')
+        is_entry = action in ('buy', 'add', 'csp', 'long_call')
+
+        if not is_entry:
+            if change is not None and abs(change) >= 5:
+                db.table('recommendations').update({
+                    'status': 'updated',
+                    'price_update_note': _format_price_note(change, rec_price, current_price, symbol),
+                }).eq('id', rec['id']).execute()
+            continue
+
+        should_review = (
+            rec.get('status') == 'updated'
+            or change is None
+            or abs(change) >= 5
+            or _recommendation_age_days(rec) >= 1
+        )
+        if not should_review:
+            continue
+
+        try:
+            review = await _review_pending_recommendation(rec, current_price, change)
+        except Exception as exc:
+            logger.warning("Pending recommendation review failed for %s: %s", ticker, exc)
+            if change is not None and abs(change) >= 5:
+                db.table('recommendations').update({
+                    'status': 'updated',
+                    'price_update_note': _format_price_note(change, rec_price, current_price, symbol),
+                }).eq('id', rec['id']).execute()
+            continue
+
+        review_status = review.get('status')
+        summary = review.get('summary') or 'Denní re-check doporučení.'
+        price_note = review.get('price_note') or (
+            _format_price_note(change, rec_price, current_price, symbol)
+            if change is not None and abs(change) >= 5
+            else None
+        )
+        combined_note = _join_parts(price_note, summary)
+
+        if review_status == 'reject':
+            db.table('recommendations').update({
+                'status': 'rejected',
+                'rejection_reason': f"Daily re-check: {summary}",
+                'rejected_at': datetime.now(timezone.utc).isoformat(),
+                'price_update_note': combined_note,
+            }).eq('id', rec['id']).execute()
+            log_event(logger, logging.INFO, 'pending_recommendation_rejected', ticker=ticker, action=action, thesis_risk=review.get('thesis_risk'), summary=summary[:160])
+            continue
+
+        if review_status == 'update' or price_note:
             db.table('recommendations').update({
                 'status': 'updated',
-                'price_update_note': note,
+                'price_update_note': combined_note,
             }).eq('id', rec['id']).execute()
+            log_event(logger, logging.INFO, 'pending_recommendation_updated', ticker=ticker, action=action, thesis_risk=review.get('thesis_risk'), summary=summary[:160])
+
+
+async def _review_pending_recommendation(rec: dict, current_price: float, change_pct: float | None) -> dict:
+    ticker = rec['ticker']
+    options_details = rec.get('options_details') or {}
+
+    try:
+        news_results = await search(f"{ticker} stock latest earnings guidance analyst news", max_results=3, days=7)
+        news_context = format_results(news_results)
+    except Exception:
+        news_context = "Zadne vysledky nenalezeny."
+
+    user_prompt = f"""Ticker: {ticker}
+Action: {rec.get('action')}
+Play type: {rec.get('play_type')}
+Confidence: {rec.get('confidence')}
+Created at: {rec.get('created_at')}
+Current status: {rec.get('status')}
+Recommended price: {rec.get('recommended_price')}
+Current price: {current_price}
+Price change pct from recommendation: {change_pct}
+
+Original thesis:
+{rec.get('thesis_text')}
+
+Exit / invalidation:
+{rec.get('exit_conditions')}
+Stored invalidation: {options_details.get('invalidation_conditions')}
+Profit-taking plan: {options_details.get('profit_taking_plan')}
+Entry rationale: {options_details.get('entry_rationale')}
+Monitoring focus: {options_details.get('monitoring_focus')}
+
+Fresh context:
+{news_context[:1200]}"""
+
+    response = await call_llm(
+        PENDING_RECOMMENDATION_REVIEW_PROMPT,
+        user_prompt,
+        max_tokens=260,
+        label=f'pending_recommendation_review:{ticker}',
+    )
+    parsed = _parse_json_object(response)
+    if not parsed:
+        return {
+            "status": "update",
+            "thesis_risk": "unknown",
+            "summary": "Denní re-check nebylo možné spolehlivě parsovat.",
+            "price_note": None,
+        }
+    return parsed
+
+
+def _price_change_pct(recommended_price: float, current_price: float) -> float | None:
+    if not recommended_price:
+        return None
+    return (current_price - recommended_price) / recommended_price * 100
+
+
+def _format_price_note(change_pct: float | None, old_price: float, current_price: float, symbol: str) -> str | None:
+    if change_pct is None:
+        return None
+
+    direction = 'vzrostla' if change_pct > 0 else 'klesla'
+    return (
+        f"Cena {direction} o {abs(change_pct):.1f}% od doporučení "
+        f"({symbol}{old_price:.2f} → {symbol}{current_price:.2f})"
+    )
+
+
+def _recommendation_age_days(rec: dict) -> int:
+    created_at = rec.get('created_at')
+    if not created_at:
+        return 0
+    try:
+        created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        return max(0, (datetime.now(timezone.utc) - created).days)
+    except Exception:
+        return 0
+
+
+def _parse_json_object(text: str) -> dict | None:
+    try:
+        parsed = json.loads(text)
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        pass
+
+    match = re.search(r"\{.*\}", text or "", flags=re.DOTALL)
+    if not match:
+        return None
+
+    try:
+        parsed = json.loads(match.group(0))
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        return None
+
+
+def _join_parts(*parts: str | None) -> str:
+    return " ".join(part.strip() for part in parts if part and part.strip())
+
+
+async def _merge_watchlist_signals(user_id: str, signals: list[SignalTicker]) -> tuple[list[SignalTicker], int]:
+    signal_by_ticker = {signal.ticker: signal for signal in signals}
+    added = 0
+
+    for item in await get_active_watchlist(user_id):
+        ticker = str(item.get("ticker") or "").upper()
+        if not ticker or ticker in signal_by_ticker:
+            continue
+
+        stage = item.get("stage") or "watching"
+        reason = item.get("signal_reason") or "Aktivní watchlist — daily re-check."
+        signal_by_ticker[ticker] = SignalTicker(
+            ticker=ticker,
+            signal_type=f"watchlist_{stage}",
+            signal_reason=reason,
+            market="EU_HK" if "." in ticker else "US",
+            signal_score=2.4 if stage == "candidate" else 1.7,
+        )
+        added += 1
+
+    merged = list(signal_by_ticker.values())
+    merged.sort(key=lambda sig: sig.signal_score, reverse=True)
+    return merged, added
 
 
 async def _fill_recommended_prices(recommendations: list, redis):

@@ -10,6 +10,7 @@ import pandas as pd
 import json
 import logging
 import math
+from datetime import datetime, timezone
 from typing import List, Dict, Optional
 from app.core.cache import CacheTTL
 from app.core.run_logging import log_event
@@ -30,6 +31,8 @@ FX_TICKERS = {
 FX_DERIVED_TICKERS = {
     "USD_HKD": "USDHKD=X",
 }
+
+INTRADAY_MAX_STALE_MINUTES = 45
 
 
 def safe_float(value, decimals: int = 4) -> Optional[float]:
@@ -68,6 +71,26 @@ def _normalize_ticker_data(df: pd.DataFrame, ticker: str) -> Optional[pd.DataFra
         ticker_data.columns = ticker_data.columns.get_level_values(0)
         return ticker_data
     return None
+
+
+def _is_fresh_intraday_index(index) -> bool:
+    if index is None or len(index) == 0:
+        return False
+
+    try:
+        latest_ts = index[-1]
+        if hasattr(latest_ts, "to_pydatetime"):
+            latest_dt = latest_ts.to_pydatetime()
+        else:
+            latest_dt = latest_ts
+
+        if latest_dt.tzinfo is None:
+            latest_dt = latest_dt.replace(tzinfo=timezone.utc)
+        latest_dt = latest_dt.astimezone(timezone.utc)
+        age_minutes = (datetime.now(timezone.utc) - latest_dt).total_seconds() / 60
+        return 0 <= age_minutes <= INTRADAY_MAX_STALE_MINUTES
+    except Exception:
+        return False
 
 
 async def get_quotes(redis, tickers: List[str]) -> Dict[str, dict]:
@@ -148,6 +171,90 @@ async def get_quotes(redis, tickers: List[str]) -> Dict[str, dict]:
     fetched = len([ticker for ticker in missing if ticker in results])
     cache_hits = len(tickers) - len(missing)
     log_event(logger, logging.INFO, 'quotes_completed', requested=len(tickers), cache_hits=cache_hits, fetched=fetched, returned=len(results))
+    return results
+
+
+async def get_intraday_quotes(redis, tickers: List[str]) -> Dict[str, dict]:
+    """Fetch 5m intraday prices and change from today's first regular-session bar."""
+    if not tickers:
+        return {}
+
+    results: Dict[str, dict] = {}
+    missing: List[str] = []
+
+    for t in tickers:
+        cached = await redis.get(f"ss:intraday_quote:{t}")
+        if cached:
+            results[t] = json.loads(cached)
+        else:
+            missing.append(t)
+
+    if not missing:
+        log_event(logger, logging.INFO, 'intraday_quotes_cache_hit', requested=len(tickers), returned=len(results))
+        return results
+
+    try:
+        df = yf.download(
+            " ".join(missing),
+            period="1d",
+            interval="5m",
+            auto_adjust=False,
+            progress=False,
+            threads=True,
+            prepost=False,
+        )
+
+        if df.empty:
+            logger.warning('yf.download() returned empty intraday data for %s', missing)
+            log_event(logger, logging.WARNING, 'intraday_quotes_download_empty', missing=missing)
+            return results
+
+        for t in missing:
+            try:
+                ticker_data = _normalize_ticker_data(df, t)
+                if ticker_data is None or ticker_data.empty:
+                    continue
+                if "Close" not in ticker_data.columns:
+                    continue
+
+                ticker_data = ticker_data.dropna(subset=["Close"])
+                if ticker_data.empty:
+                    continue
+                if not _is_fresh_intraday_index(ticker_data.index):
+                    log_event(logger, logging.INFO, 'intraday_quote_skipped', ticker=t, reason='stale_intraday_data')
+                    continue
+
+                first = ticker_data.iloc[0]
+                latest = ticker_data.iloc[-1]
+                open_price = safe_float(first.get("Open") if "Open" in ticker_data.columns else first["Close"])
+                price = safe_float(latest["Close"])
+                if open_price is None or price is None or open_price <= 0:
+                    continue
+
+                volume = int(ticker_data.get("Volume", pd.Series(dtype=float)).fillna(0).sum())
+                change_pct = safe_float((price - open_price) / open_price * 100) or 0.0
+
+                quote = {
+                    "ticker": t,
+                    "price": price,
+                    "intraday_open": open_price,
+                    "intraday_change_pct": change_pct,
+                    "volume": volume,
+                    "bars": len(ticker_data),
+                }
+                results[t] = quote
+                await redis.set(f"ss:intraday_quote:{t}", json.dumps(quote), ex=CacheTTL.QUOTE_BASIC)
+
+            except Exception as e:
+                logger.warning("Failed to process intraday quote for %s: %s", t, e)
+
+    except Exception as e:
+        log_event(logger, logging.ERROR, 'intraday_quotes_download_failed', missing=missing, error=str(e), error_type=type(e).__name__)
+        logger.error('yf.download() intraday failed: %s', e)
+
+    fetched = len([ticker for ticker in missing if ticker in results])
+    cache_hits = len(tickers) - len(missing)
+    log_event(logger, logging.INFO, 'intraday_quotes_completed', requested=len(tickers), cache_hits=cache_hits, fetched=fetched, returned=len(results))
     return results
 
 

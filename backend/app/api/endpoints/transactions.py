@@ -4,8 +4,9 @@ from app.core.supabase import get_supabase
 from app.core.redis import get_redis
 from app.schemas.transactions import TransactionCreate, TransactionResponse
 from app.services.market.quotes import get_fx_rates, get_fx_rate, to_czk
+from app.services.thesis_service import create_thesis_event, get_current_thesis
 from typing import List
-from datetime import timezone
+from datetime import datetime, timezone
 import logging
 
 logger = logging.getLogger(__name__)
@@ -96,7 +97,6 @@ async def log_transaction(
     fx_rate = get_fx_rate(data.currency, fx)
     size_czk = to_czk(data.shares * data.price_per_share, data.currency, fx)
 
-    # Determine play_type from recommendation if linked
     play_type = "A"
     if data.recommendation_id:
         rec = db.table("recommendations").select("play_type").eq("id", data.recommendation_id).eq("user_id", user_id).execute()
@@ -171,16 +171,9 @@ async def log_manual_transaction(
     if not tx_response.data:
         raise HTTPException(status_code=500, detail="Nepodařilo se uložit transakci")
 
-    # Generate retroactive thesis if this is a buy
     if data.action == "buy":
         try:
             from app.agent.thesis_generator import generate_retroactive_thesis
-            thesis_data = await generate_retroactive_thesis(
-                ticker=data.ticker.upper(),
-                action=data.action,
-                price=data.price_per_share,
-                play_type=data.play_type,
-            )
             pos_response = (
                 db.table("positions")
                 .select("id")
@@ -191,15 +184,104 @@ async def log_manual_transaction(
             )
             if pos_response.data:
                 position_id = pos_response.data[0]["id"]
-                db.table("theses").insert({
-                    "user_id": user_id,
-                    "position_id": position_id,
-                    "ticker": data.ticker.upper(),
-                    **thesis_data,
-                    "notes_log": [],
-                }).execute()
+                existing_thesis = get_current_thesis(db, user_id, position_id)
+
+                if existing_thesis:
+                    # Existing open position — insert manual_scaled event only
+                    create_thesis_event(
+                        db,
+                        thesis=existing_thesis,
+                        kind="manual_scaled",
+                        text=data.notes or "Ruční navýšení pozice.",
+                        payload={
+                            "source": "manual_transaction",
+                            "price": data.price_per_share,
+                            "shares": data.shares,
+                            "currency": data.currency,
+                            "size_czk": round(size_czk, 2),
+                            "executed_at": data.executed_at.isoformat(),
+                        },
+                        status_before=existing_thesis.get("status", "intact"),
+                        status_after=existing_thesis.get("status", "intact"),
+                    )
+                else:
+                    # New position — generate structured thesis
+                    thesis_data = await generate_retroactive_thesis(
+                        ticker=data.ticker.upper(),
+                        action=data.action,
+                        price=data.price_per_share,
+                        play_type=data.play_type,
+                    )
+                    thesis_payload = {
+                        "user_id": user_id,
+                        "position_id": position_id,
+                        "ticker": data.ticker.upper(),
+                        "play_type": thesis_data.pop("play_type", data.play_type),
+                        "status": "intact",
+                        **thesis_data,
+                    }
+                    thesis_response = db.table("theses").insert(thesis_payload).execute()
+                    if thesis_response.data:
+                        new_thesis = thesis_response.data[0]
+                        create_thesis_event(
+                            db,
+                            thesis=new_thesis,
+                            kind="opened",
+                            text="Pozice otevřena manuálně — retroaktivní thesis vygenerována.",
+                            payload={
+                                "source": "manual_transaction",
+                                "price": data.price_per_share,
+                                "shares": data.shares,
+                                "currency": data.currency,
+                                "size_czk": round(size_czk, 2),
+                                "executed_at": data.executed_at.isoformat(),
+                            },
+                            status_before=None,
+                            status_after="intact",
+                        )
         except Exception as e:
             logger.warning("Retroactive thesis generation failed for %s: %s", data.ticker, e)
+
+    elif data.action == "sell":
+        try:
+            # Find the position that was just affected
+            pos_check = (
+                db.table("positions").select("id, status")
+                .eq("user_id", user_id).eq("ticker", data.ticker.upper())
+                .order("created_at", desc=True).limit(1)
+                .execute()
+            )
+            if pos_check.data:
+                position_id = pos_check.data[0]["id"]
+                thesis = get_current_thesis(db, user_id, position_id)
+                if not thesis:
+                    thesis_resp = (
+                        db.table("theses").select("*")
+                        .eq("position_id", position_id).eq("user_id", user_id)
+                        .execute()
+                    )
+                    thesis = thesis_resp.data[0] if thesis_resp.data else None
+                if thesis:
+                    is_closed = pos_check.data[0].get("status") == "closed"
+                    create_thesis_event(
+                        db,
+                        thesis=thesis,
+                        kind="closed" if is_closed else "manual_partial_exit",
+                        text=data.notes or ("Pozice uzavřena manuálně." if is_closed else "Ruční částečný výstup."),
+                        payload={
+                            "source": "manual_transaction",
+                            "price": data.price_per_share,
+                            "shares": data.shares,
+                            "currency": data.currency,
+                            "size_czk": round(size_czk, 2),
+                            "realized_pnl_czk": realized_pnl_czk,
+                            "executed_at": data.executed_at.isoformat(),
+                        },
+                        status_before=thesis.get("status", "intact"),
+                        status_after=thesis.get("status", "intact"),
+                    )
+        except Exception as e:
+            logger.warning("Thesis event for manual sell failed for %s: %s", data.ticker, e)
 
     return tx_response.data[0]
 
