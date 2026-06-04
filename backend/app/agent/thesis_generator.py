@@ -13,7 +13,9 @@ SYSTEM_PROMPT = """Jsi asistent investičního analytika SwingScout. Tvým úkol
 Teze musí obsahovat:
 1. Proč je akcie zajímavá (1-2 věty)
 2. Hlavní katalyzátor nebo důvod vstupu
-3. Za jakých podmínek by měla být pozice uzavřena
+3. Kdy je teze špatně a pozici zavřít
+4. Kdy a jak vybírat zisky
+5. Krátký horizont držení
 
 Formát: prostý text, maximálně 150 slov, česky."""
 
@@ -58,7 +60,7 @@ Napiš stručnou investiční tezi pro tuto pozici."""
 
     return {
         "entry_thesis": thesis_text,
-        "exit_conditions": "Definuj exit podmínky ručně.",
+        "exit_conditions": "Doplň ručně: kdy je teze špatně a kdy staged vybírat zisky.",
         "horizon": horizon_map.get(play_type, "Týdny až měsíce"),
         "play_type": play_type,
     }

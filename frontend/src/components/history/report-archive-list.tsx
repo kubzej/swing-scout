@@ -41,7 +41,7 @@ export function ReportArchiveList({
                   Daily run · {formatDateTime(run.started_at)}
                 </div>
                 <div className="mt-1 text-sm text-muted-foreground">
-                  Regime {run.market_regime || '—'} · Fear & Greed {run.fng_score ?? '—'}
+                  Regime {run.market_regime || '—'} · Sentiment {run.fng_score ?? '—'}
                 </div>
               </div>
               <RunStatusBadge status={run.status} />

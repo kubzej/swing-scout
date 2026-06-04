@@ -5,6 +5,22 @@ export interface ThesisNote {
   timestamp: string;
   status_before?: string | null;
   status_after?: string | null;
+  kind?: string | null;
+  strategy?: {
+    invalidation_conditions?: string | null;
+    profit_taking_plan?: string | null;
+    holding_horizon?: string | null;
+    monitoring_focus?: string | null;
+    source_run_type?: string | null;
+  } | null;
+}
+
+export interface ThesisStrategySnapshot {
+  invalidation_conditions?: string | null;
+  profit_taking_plan?: string | null;
+  holding_horizon?: string | null;
+  monitoring_focus?: string | null;
+  source_run_type?: string | null;
 }
 
 export interface ThesisResponse {
@@ -58,4 +74,19 @@ export async function fetchThesis(positionId: string): Promise<ThesisResponse | 
     ...thesis,
     notes_log: parseNotesLog(thesis.notes_log),
   };
+}
+
+export function getLatestStrategySnapshot(notes: ThesisNote[]): ThesisStrategySnapshot | null {
+  for (let index = notes.length - 1; index >= 0; index -= 1) {
+    const note = notes[index];
+    if (note.kind === 'strategy_snapshot' && note.strategy) {
+      return note.strategy;
+    }
+  }
+
+  return null;
+}
+
+export function getDisplayNotes(notes: ThesisNote[]): ThesisNote[] {
+  return notes.filter((note) => note.kind !== 'strategy_snapshot');
 }

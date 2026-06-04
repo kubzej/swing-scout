@@ -39,7 +39,7 @@ export function RunSummaryCard({ run }: RunSummaryCardProps) {
           </div>
           <div className="rounded-2xl border border-border bg-white/4 px-4 py-3">
             <div className="text-xs uppercase tracking-[0.16em] text-muted-foreground">
-              Fear & Greed
+              Sentiment
             </div>
             <div className="mt-1 font-medium text-foreground">
               {run.fng_score ?? '—'}

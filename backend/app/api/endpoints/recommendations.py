@@ -21,6 +21,23 @@ def _with_source_run_type(rows: list[dict] | None) -> list[dict]:
     return enriched
 
 
+def _build_strategy_snapshot_note(*, invalidation: Optional[str], profit_plan: Optional[str], horizon: Optional[str], monitoring_focus: Optional[str], source_run_type: str) -> dict:
+    return {
+        "kind": "strategy_snapshot",
+        "text": "Strategie při otevření pozice uložena.",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "status_before": None,
+        "status_after": "intact",
+        "strategy": {
+            "invalidation_conditions": invalidation,
+            "profit_taking_plan": profit_plan,
+            "holding_horizon": horizon,
+            "monitoring_focus": monitoring_focus,
+            "source_run_type": source_run_type,
+        },
+    }
+
+
 class ConfirmRequest(BaseModel):
     actual_price: float
     actual_shares: Optional[int] = None
@@ -175,15 +192,36 @@ async def confirm_recommendation(
                     position_id = pos_after.data[0]["id"]
                     existing = db.table("theses").select("id").eq("position_id", position_id).eq("user_id", user_id).execute()
                     if not existing.data:
+                        invalidation = rec_opts.get("invalidation_conditions")
+                        profit_plan = rec_opts.get("profit_taking_plan")
+                        monitoring_focus = rec_opts.get("monitoring_focus")
+                        horizon = rec_opts.get("holding_horizon")
+                        combined_exit = "\n".join(
+                            part for part in [
+                                f"Invalidační podmínky: {invalidation}" if invalidation else None,
+                                f"Výběr zisků: {profit_plan}" if profit_plan else None,
+                                f"Monitoring: {monitoring_focus}" if monitoring_focus else None,
+                            ] if part
+                        ) or r.get("exit_conditions")
+                        notes_log = [
+                            _build_strategy_snapshot_note(
+                                invalidation=invalidation,
+                                profit_plan=profit_plan,
+                                horizon=horizon,
+                                monitoring_focus=monitoring_focus,
+                                source_run_type="daily" if r.get("run_id") else "intraday",
+                            )
+                        ]
                         db.table("theses").insert({
                             "user_id": user_id,
                             "position_id": position_id,
                             "ticker": ticker,
                             "entry_thesis": r["thesis_text"],
-                            "exit_conditions": r.get("exit_conditions"),
+                            "exit_conditions": combined_exit,
+                            "horizon": horizon,
                             "play_type": r.get("play_type", "A"),
                             "status": "intact",
-                            "notes_log": [],
+                            "notes_log": notes_log,
                         }).execute()
             except Exception as e:
                 logger.warning("Thesis creation failed for %s: %s", ticker, e)

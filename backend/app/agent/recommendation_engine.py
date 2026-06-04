@@ -85,15 +85,23 @@ def build_recommendations_with_diagnostics(
             continue
 
         if portfolio_full:
-            rotation = _find_rotation_candidate(portfolio)
+            rotation = _find_rotation_candidate(portfolio, flags)
             if not rotation:
                 logger.info('Portfolio full, no rotation candidate for %s', ticker)
                 record_skip('portfolio_full', ticker)
                 log_event(logger, logging.INFO, 'recommendation_candidate_skipped', ticker=ticker, reason='portfolio_full')
                 continue
-            recommendations.append(_make_rotation_recommendation(candidate, rotation))
+            recommendations.append(_make_rotation_recommendation(candidate, rotation['ticker'], rotation.get('reason')))
             diagnostics['rotation_recommendations'] += 1
-            log_event(logger, logging.INFO, 'recommendation_rotation_created', ticker=ticker, exit_ticker=rotation, confidence=candidate.confidence)
+            log_event(
+                logger,
+                logging.INFO,
+                'recommendation_rotation_created',
+                ticker=ticker,
+                exit_ticker=rotation['ticker'],
+                exit_reason=rotation.get('reason'),
+                confidence=candidate.confidence,
+            )
             continue
 
         if available_cash < candidate.recommended_size_czk * 0.5:
@@ -116,6 +124,10 @@ def build_recommendations_with_diagnostics(
             "options_details": {
                 "entry_rationale": candidate.entry_rationale,
                 "portfolio_fit_note": candidate.portfolio_fit_note,
+                "invalidation_conditions": candidate.invalidation_conditions,
+                "profit_taking_plan": candidate.profit_taking_plan,
+                "holding_horizon": candidate.holding_horizon,
+                "monitoring_focus": candidate.monitoring_focus,
                 "sector": candidate.sector,
                 "industry": candidate.industry,
                 "exchange": candidate.exchange,
@@ -176,6 +188,23 @@ def build_recommendations_with_diagnostics(
             })
             diagnostics["flag_recommendations"] += 1
 
+        elif flag.flag_type == "thesis_delivered":
+            partial_size = round(pos.current_value_czk * 0.5)
+            recommendations.append({
+                "ticker": flag.ticker,
+                "action": "sell",
+                "play_type": pos.play_type,
+                "confidence": 3,
+                "recommended_price": None,
+                "recommended_size_czk": partial_size,
+                "add_reserve_czk": 0,
+                "thesis_text": flag.detail,
+                "exit_conditions": "Prodat cca 50 % pozice a zbytek znovu vyhodnotit při dalším denním běhu.",
+                "is_options_play": False,
+                "options_details": None,
+            })
+            diagnostics["flag_recommendations"] += 1
+
         elif flag.flag_type == "partial_profit":
             partial_size = round(pos.current_value_czk * 0.3)
             recommendations.append({
@@ -186,7 +215,7 @@ def build_recommendations_with_diagnostics(
                 "recommended_price": None,
                 "recommended_size_czk": partial_size,
                 "add_reserve_czk": 0,
-                "thesis_text": f"Parciální výběr zisku — F&G spike. Pozice {pos.unrealized_pnl_pct:+.1f}%.",
+                "thesis_text": f"Parciální výběr zisku — sentiment spike. Pozice {pos.unrealized_pnl_pct:+.1f}%.",
                 "exit_conditions": "Prodat cca 30% pozice.",
                 "is_options_play": False,
                 "options_details": None,
@@ -238,18 +267,44 @@ def _load_recently_rejected(db, user_id: str) -> set:
     return {r["ticker"] for r in (response.data or [])}
 
 
-def _find_rotation_candidate(portfolio: PortfolioSnapshot) -> Optional[str]:
-    """Find profitable position where thesis may be delivered (best candidate for rotation)."""
-    best = None
-    best_pnl = 10.0  # Minimum 10% profit to consider rotation
+def _find_rotation_candidate(portfolio: PortfolioSnapshot, flags: List[PositionFlag]) -> Optional[dict]:
+    """Prefer zombie/delivered positions over generic profitable winners for rotation."""
+    positions_by_ticker = {pos.ticker: pos for pos in portfolio.positions}
+
+    priority_buckets = [
+        ("zombie", 1),
+        ("thesis_delivered", 2),
+        ("partial_profit", 3),
+    ]
+    for flag_type, _priority in priority_buckets:
+        flagged = []
+        for flag in flags:
+            if flag.flag_type != flag_type:
+                continue
+            pos = positions_by_ticker.get(flag.ticker)
+            if not pos:
+                continue
+            flagged.append((pos.unrealized_pnl_pct, flag))
+        if flagged:
+            flagged.sort(key=lambda item: item[0], reverse=True)
+            best_flag = flagged[0][1]
+            return {"ticker": best_flag.ticker, "reason": best_flag.detail}
+
+    best_pos = None
+    best_pnl = 15.0  # Minimum 15% profit to consider generic rotation
     for pos in portfolio.positions:
         if pos.unrealized_pnl_pct > best_pnl:
             best_pnl = pos.unrealized_pnl_pct
-            best = pos.ticker
-    return best
+            best_pos = pos
+    if best_pos:
+        return {
+            "ticker": best_pos.ticker,
+            "reason": f"Profitová pozice +{best_pos.unrealized_pnl_pct:.1f}% s pravděpodobně nižším upside než nový kandidát.",
+        }
+    return None
 
 
-def _make_rotation_recommendation(candidate: Candidate, exit_ticker: str) -> dict:
+def _make_rotation_recommendation(candidate: Candidate, exit_ticker: str, exit_reason: Optional[str] = None) -> dict:
     return {
         "ticker": candidate.ticker,
         "action": "buy",
@@ -264,7 +319,10 @@ def _make_rotation_recommendation(candidate: Candidate, exit_ticker: str) -> dic
         "options_details": {
             "type": "rotation",
             "exit_ticker": exit_ticker,
-            "note": f"Zvaž prodat {exit_ticker} (profitová pozice, omezený upside) a otevřít {candidate.ticker}.",
+            "note": (
+                f"Zvaž prodat {exit_ticker} a otevřít {candidate.ticker}."
+                + (f" Důvod rotace: {exit_reason}" if exit_reason else "")
+            ),
         },
     }
 

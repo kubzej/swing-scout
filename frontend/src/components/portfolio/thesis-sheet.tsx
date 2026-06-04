@@ -1,10 +1,11 @@
 import { X } from 'lucide-react';
 
 import { PlayTypeBadge } from '@/components/recommendations/play-type-badge';
+import { ThesisStrategySection } from '@/components/portfolio/thesis-strategy-section';
 import { ThesisStatusBadge } from '@/components/portfolio/thesis-status-badge';
 import { Button } from '@/components/ui/button';
 import type { PortfolioPosition } from '@/lib/api/portfolio';
-import type { ThesisResponse } from '@/lib/api/theses';
+import { getDisplayNotes, getLatestStrategySnapshot, type ThesisResponse } from '@/lib/api/theses';
 import { formatCurrency, formatCzk, formatDateTime, formatPercent } from '@/lib/format';
 
 interface ThesisSheetProps {
@@ -19,6 +20,8 @@ export function ThesisSheet({ open, position, thesis, loading, onClose }: Thesis
   if (!open || !position) return null;
 
   const pnlPositive = (position.unrealized_pnl_czk ?? 0) >= 0;
+  const displayNotes = thesis ? getDisplayNotes(thesis.notes_log) : [];
+  const strategy = thesis ? getLatestStrategySnapshot(thesis.notes_log) : null;
 
   return (
     <div className="fixed inset-0 z-40 flex justify-end bg-black/55 backdrop-blur-sm">
@@ -60,20 +63,21 @@ export function ThesisSheet({ open, position, thesis, loading, onClose }: Thesis
           ) : thesis ? (
             <>
               <Section label="Teze" text={thesis.entry_thesis} />
-              {thesis.exit_conditions ? (
+              {strategy ? <ThesisStrategySection strategy={strategy} /> : null}
+              {!strategy && thesis.exit_conditions ? (
                 <Section label="Exit podmínky" text={thesis.exit_conditions} />
               ) : null}
-              {thesis.horizon ? (
+              {!strategy && thesis.horizon ? (
                 <Section label="Horizont" text={thesis.horizon} />
               ) : null}
 
-              {thesis.notes_log.length > 0 ? (
+              {displayNotes.length > 0 ? (
                 <div>
                   <div className="mb-2 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
                     Poznámky
                   </div>
                   <div className="space-y-2">
-                    {thesis.notes_log.map((note, i) => (
+                    {displayNotes.map((note, i) => (
                       <div key={`${note.timestamp}-${i}`} className="border-l-2 border-border pl-3">
                         <p className="text-sm text-foreground">{note.text}</p>
                         <p className="mt-0.5 text-xs text-muted-foreground/60">

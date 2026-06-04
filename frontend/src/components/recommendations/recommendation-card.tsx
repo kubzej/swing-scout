@@ -45,6 +45,10 @@ export function RecommendationCard({
   const entryRationale = (opts?.entry_rationale as string) || null;
   const portfolioFitNote = (opts?.portfolio_fit_note as string) || null;
   const optionsNote = (opts?.note as string) || null;
+  const invalidationConditions = (opts?.invalidation_conditions as string) || recommendation.exit_conditions || null;
+  const profitTakingPlan = (opts?.profit_taking_plan as string) || null;
+  const holdingHorizon = (opts?.holding_horizon as string) || null;
+  const monitoringFocus = (opts?.monitoring_focus as string) || null;
   const sector = (opts?.sector as string) || null;
   const industry = (opts?.industry as string) || null;
   const exchange = (opts?.exchange as string) || null;
@@ -142,8 +146,17 @@ export function RecommendationCard({
             <Section label="Důvod vstupu" text={entryRationale} />
           ) : null}
           <Section label="Teze" text={recommendation.thesis_text} />
-          {recommendation.exit_conditions ? (
-            <Section label="Exit" text={recommendation.exit_conditions} />
+          {profitTakingPlan ? (
+            <Section label="Kdy brát zisky" text={profitTakingPlan} />
+          ) : null}
+          {invalidationConditions ? (
+            <Section label="Kdy je teze špatně" text={invalidationConditions} />
+          ) : null}
+          {holdingHorizon ? (
+            <Section label="Horizont" text={holdingHorizon} />
+          ) : null}
+          {monitoringFocus ? (
+            <Section label="Co dál hlídat" text={monitoringFocus} />
           ) : null}
           {showFitNote ? (
             <Section label="Portfolio fit" text={portfolioFitNote!} />

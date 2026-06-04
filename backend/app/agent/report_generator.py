@@ -3,7 +3,9 @@ Daily report generator — Czech, AG-inspired format.
 Multi-currency aware. Batches DB calls.
 """
 import logging
-from datetime import datetime, timezone
+import re
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from typing import List, Dict, Optional
 
 from app.services.portfolio_service import PortfolioSnapshot
@@ -34,6 +36,27 @@ CURRENCY_SYMBOL = {
     "USD": "$", "EUR": "€", "GBP": "£", "HKD": "HK$",
     "CZK": "Kč", "NOK": "kr", "DKK": "kr",
 }
+TITLE_DATE_RE = re.compile(
+    r"\b("
+    r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    r"jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
+    r")\s+\d{1,2},\s+\d{4}\b",
+    re.IGNORECASE,
+)
+GENERIC_MARKET_NEWS_PHRASES = (
+    "stock market news for",
+    "global stock market news",
+    "world indices coverage",
+    "historical data",
+)
+
+SENTIMENT_LABELS_CS = {
+    "extreme_fear": "extrémní strach",
+    "fear": "strach",
+    "neutral": "neutrální",
+    "greed": "chamtivost",
+    "extreme_greed": "extrémní chamtivost",
+}
 
 
 def _fmt_price(price: Optional[float], currency: str = "USD") -> str:
@@ -41,6 +64,69 @@ def _fmt_price(price: Optional[float], currency: str = "USD") -> str:
         return "—"
     sym = CURRENCY_SYMBOL.get(currency, currency + " ")
     return f"{sym}{price:.2f}"
+
+
+def _parse_result_datetime(raw_value: Optional[str]) -> Optional[datetime]:
+    if not raw_value:
+        return None
+    try:
+        if "T" in raw_value:
+            dt = datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+        else:
+            dt = parsedate_to_datetime(raw_value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _contains_stale_title_date(title: str, now: datetime) -> bool:
+    match = TITLE_DATE_RE.search(title or "")
+    if not match:
+        return False
+    try:
+        parsed = datetime.strptime(match.group(0), "%B %d, %Y").replace(tzinfo=timezone.utc)
+    except ValueError:
+        try:
+            parsed = datetime.strptime(match.group(0), "%b %d, %Y").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return False
+    return parsed.date() < now.date()
+
+
+def _is_generic_market_roundup(title: str) -> bool:
+    lowered = (title or "").strip().lower()
+    return any(phrase in lowered for phrase in GENERIC_MARKET_NEWS_PHRASES)
+
+
+def _select_fresh_market_news(results: List[dict], now: datetime) -> List[dict]:
+    fresh_cutoff = now - timedelta(hours=30)
+    fresh_results: List[tuple[int, datetime, dict]] = []
+
+    for result in results:
+        title = result.get("title", "") or ""
+        published_at = _parse_result_datetime(result.get("published_at") or result.get("published_date"))
+
+        if _contains_stale_title_date(title, now):
+            continue
+        if _is_generic_market_roundup(title):
+            continue
+        if published_at and published_at < fresh_cutoff:
+            continue
+
+        freshness_rank = 0 if published_at else 1
+        freshness_dt = published_at or now
+        fresh_results.append((freshness_rank, freshness_dt, result))
+
+    fresh_results.sort(key=lambda item: (item[0], -item[1].timestamp()))
+    return [item[2] for item in fresh_results[:3]]
+
+
+def _format_sentiment_label(label: Optional[str]) -> str:
+    if not label:
+        return "—"
+    return SENTIMENT_LABELS_CS.get(label, label)
 
 
 def _batch_load_theses(user_id: str, position_ids: List[str]) -> Dict[str, str]:
@@ -141,19 +227,22 @@ async def generate_report(
 
     # CO HÝBE TRHEM
     try:
-        market_news = await search("global stock market news today major moves", max_results=3, days=1)
+        raw_market_news = await search("global stock market news today major moves", max_results=6, days=1)
+        market_news = _select_fresh_market_news(raw_market_news, now)
         parts.append("## Co dnes hýbe trhem\n")
 
-        fng_spike_note = " — F&G spike, zvažit parciální výběr" if market_context.fng_spike else ""
+        fng_spike_note = " — sentiment spike, zvaž parciální výběr" if market_context.fng_spike else ""
         parts.append(
             f"**{market_context.market_regime.upper()}** "
-            f"| F&G: {market_context.fng_score or '—'} ({market_context.fng_label or '—'})"
+            f"| Sentiment: {market_context.fng_score or '—'} ({_format_sentiment_label(market_context.fng_label)})"
             f"{fng_spike_note}\n"
         )
 
         if market_news:
             news_titles = "\n".join(
-                f"- {r.get('title', '')} — {(r.get('content', '') or '')[:150]}"
+                f"- [{r.get('provider', 'search')}] {r.get('title', '')}"
+                f" | published: {r.get('published_at') or r.get('published_date') or 'unknown'}"
+                f" | {(r.get('content', '') or '')[:150]}"
                 for r in market_news[:3]
             )
             try:

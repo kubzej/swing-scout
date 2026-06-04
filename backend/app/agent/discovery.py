@@ -56,7 +56,6 @@ SIGNAL_SEARCHES = [
     ("biggest movers gainers losers stock market today", "market_mover"),
     ("earnings beat surprise strong results quarterly report today", "earnings_beat"),
     ("analyst upgrade initiation buy rating stock today", "analyst_upgrade"),
-    ("IPO debut first day trading new listing today", "ipo_debut"),
     ("European stocks news movers today", "eu_mover"),
     ("Hong Kong China stocks news movers today", "hk_mover"),
     ("breakout momentum trending stocks today", "momentum"),
@@ -101,6 +100,10 @@ class Candidate:
     thesis: str
     entry_rationale: str
     exit_conditions: str
+    invalidation_conditions: str
+    profit_taking_plan: str
+    holding_horizon: str
+    monitoring_focus: str
     portfolio_fit_note: str
     recommended_size_czk: float
     add_reserve_czk: float
@@ -128,11 +131,19 @@ CLASSIFICATION_PROMPT = """Jsi portfolio analytik. Na základě informací o akc
    - 4: silné — vše se shoduje: technicals bullish, fundamentals solidní, jasný katalyzátor, momentum potvrzuje. Dávej pouze výjimečně.
 
 3. Krátká investiční teze (max 100 slov, česky)
-4. Exit podmínky (1-2 věty, česky)
-5. Důvod vstupu (1 věta, česky)
+4. Invalidation podmínky — kdy je teze špatně a pozici zavřít / výrazně omezit
+5. Profit-taking plán — kdy vybírat zisky, ideálně staged a podle typu hry
+6. Holding horizon — stručně: dny / týdny / měsíce a proč
+7. Monitoring focus — co přesně dál sledovat po vstupu
+8. Důvod vstupu (1 věta, česky)
+
+Pravidla pro exit podle typu hry:
+- Type A: hlavní osa je thesis break nebo thesis delivered. Nepiš jen technický stop-loss.
+- Type B: hlavní osa je catalyst played out / catalyst failed / time condition.
+- Type C: hlavní osa je aktivní staged profit-taking + rychlá invalidace při ztrátě momentum.
 
 Odpověz ve formátu JSON:
-{"play_type": "A|B|C", "confidence": 1-4, "thesis": "...", "exit_conditions": "...", "entry_rationale": "..."}
+{"play_type": "A|B|C", "confidence": 1-4, "thesis": "...", "invalidation_conditions": "...", "profit_taking_plan": "...", "holding_horizon": "...", "monitoring_focus": "...", "entry_rationale": "..."}
 
 Pokud akcie nesplňuje kritéria (meme, pink sheet, bez teze), odpověz: {"skip": true}
 
@@ -457,7 +468,7 @@ Signal: {sig.signal_type} — {sig.signal_reason}
 Fundamentals: PE={fundamentals.get('pe')}, revenue_growth={fundamentals.get('revenue_growth')}, sector={fundamentals.get('sector')}, country={fundamentals.get('country')}, market_cap={fundamentals.get('market_cap')}
 Technicals: RSI={technicals.get('rsi14')}, trend={technicals.get('trend_signal')}, SMA50={technicals.get('sma50')}, SMA200={technicals.get('sma200')}
 Upcoming earnings (7d): {'ANO' if has_upcoming_earnings else 'NE'}
-Market regime: {market_context.market_regime} (F&G: {market_context.fng_score})
+Market regime: {market_context.market_regime} (sentiment score: {market_context.fng_score})
 Portfolio fit: {fit_note}
 
 News:
@@ -535,7 +546,11 @@ News:
                 confidence=confidence,
                 thesis=classification.get("thesis", ""),
                 entry_rationale=classification.get("entry_rationale", ""),
-                exit_conditions=classification.get("exit_conditions", ""),
+                exit_conditions=classification.get("invalidation_conditions", "") or classification.get("exit_conditions", ""),
+                invalidation_conditions=classification.get("invalidation_conditions", "") or classification.get("exit_conditions", ""),
+                profit_taking_plan=classification.get("profit_taking_plan", ""),
+                holding_horizon=classification.get("holding_horizon", ""),
+                monitoring_focus=classification.get("monitoring_focus", ""),
                 portfolio_fit_note=fit_note,
                 recommended_size_czk=size_czk,
                 add_reserve_czk=reserve_czk,

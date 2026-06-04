@@ -1,10 +1,12 @@
 import { useState } from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 
+import { ThesisStrategySection } from '@/components/portfolio/thesis-strategy-section';
 import { PlayTypeBadge } from '@/components/recommendations/play-type-badge';
 import { ThesisStatusBadge } from '@/components/portfolio/thesis-status-badge';
 import type { PortfolioPosition } from '@/lib/api/portfolio';
 import type { ThesisStatusSummary } from '@/hooks/use-portfolio';
+import { getDisplayNotes, getLatestStrategySnapshot } from '@/lib/api/theses';
 import { formatCurrency, formatCzk, formatPercent } from '@/lib/format';
 
 interface HoldingsTableProps {
@@ -41,6 +43,8 @@ export function HoldingsTable({ positions, thesisStatuses }: HoldingsTableProps)
               const thesis = ts?.thesis ?? null;
               const isExpanded = expandedId === position.id;
               const pnlClass = (position.unrealized_pnl_czk ?? 0) >= 0 ? 'text-positive' : 'text-negative';
+              const displayNotes = thesis ? getDisplayNotes(thesis.notes_log) : [];
+              const strategy = thesis ? getLatestStrategySnapshot(thesis.notes_log) : null;
 
               return (
                 <>
@@ -101,16 +105,17 @@ export function HoldingsTable({ positions, thesisStatuses }: HoldingsTableProps)
                         ) : thesis ? (
                           <div className="space-y-3 max-w-2xl">
                             <InlineSection label="Teze" text={thesis.entry_thesis} />
-                            {thesis.exit_conditions ? (
+                            {strategy ? <ThesisStrategySection strategy={strategy} compact /> : null}
+                            {!strategy && thesis.exit_conditions ? (
                               <InlineSection label="Exit" text={thesis.exit_conditions} />
                             ) : null}
-                            {thesis.notes_log.length > 0 ? (
+                            {displayNotes.length > 0 ? (
                               <div>
                                 <span className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground/70">
                                   Poznámky —{' '}
                                 </span>
                                 <span className="text-xs text-muted-foreground">
-                                  {thesis.notes_log[thesis.notes_log.length - 1].text}
+                                  {displayNotes[displayNotes.length - 1].text}
                                 </span>
                               </div>
                             ) : null}
