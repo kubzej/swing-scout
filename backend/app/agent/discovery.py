@@ -22,7 +22,7 @@ from app.services.market.financials import get_fundamentals, is_valid_stock
 from app.services.market.alpha_vantage import get_top_movers
 from app.services.market.technical import get_technicals
 from app.services.market.earnings import get_upcoming_earnings
-from app.services.market.quotes import get_fx_rates
+from app.services.market.quotes import get_fx_rate, get_fx_rates
 from app.services.market.market_context import MarketContext
 from app.services.portfolio_service import PortfolioSnapshot
 from app.ai.client import call_llm
@@ -64,7 +64,7 @@ SIGNAL_SEARCHES = [
 
 TICKER_REGEX = re.compile(r"\b(?:[0-9]{4}\.HK|[A-Z]{1,5}(?:\.[A-Z]{1,3})?)\b")
 US_TICKER_REGEX = re.compile(r"^[A-Z]{1,5}$")
-EU_HK_SUFFIXES = (".DE", ".L", ".F", ".OL", ".HK", ".PA", ".AS")
+EU_HK_SUFFIXES = (".DE", ".L", ".F", ".OL", ".HK", ".PA", ".AS", ".SW", ".ST", ".CO", ".HE", ".BR", ".MI", ".MC", ".VI", ".WA")
 TICKER_STOPWORDS = {
     "AI", "ALL", "AND", "ARE", "ATH", "CEO", "CFO", "ETF", "EPS", "EUR",
     "FDA", "GDP", "GLD", "HK", "IPO", "NYSE", "QQQ", "SEC", "SPY", "TLT",
@@ -81,6 +81,33 @@ TICKER_NOISE_WORDS = {
 ALPHA_VANTAGE_MIN_PRICE = 5.0
 ALPHA_VANTAGE_MIN_VOLUME = 500_000
 ALPHA_VANTAGE_MIN_MOVE_PCT = 3.0
+SEARCH_SIGNAL_BASE_SCORES = {
+    "market_mover": 1.0,
+    "earnings_beat": 1.6,
+    "analyst_upgrade": 1.4,
+    "eu_mover": 1.8,
+    "hk_mover": 1.8,
+    "momentum": 1.3,
+    "volume_spike": 1.2,
+}
+SUFFIX_CURRENCY_MAP = {
+    ".HK": "HKD",
+    ".L": "GBP",
+    ".PA": "EUR",
+    ".AS": "EUR",
+    ".DE": "EUR",
+    ".F": "EUR",
+    ".MI": "EUR",
+    ".MC": "EUR",
+    ".HE": "EUR",
+    ".BR": "EUR",
+    ".SW": "CHF",
+    ".ST": "SEK",
+    ".OL": "NOK",
+    ".CO": "DKK",
+    ".VI": "EUR",
+    ".WA": "PLN",
+}
 
 
 @dataclass
@@ -111,7 +138,8 @@ class Candidate:
     sector: str = ""
     industry: str = ""
     exchange: str = ""
-    current_price_usd: Optional[float] = None
+    currency: str = "USD"
+    current_price: Optional[float] = None
     recommended_shares: Optional[int] = None
     reserve_shares: Optional[int] = None
 
@@ -150,6 +178,27 @@ Pokud akcie nesplňuje kritéria (meme, pink sheet, bez teze), odpověz: {"skip"
 Nepoužívej emojis v žádném z textových polí."""
 
 
+def _search_signal_score(signal_type: str, market: str) -> float:
+    base = SEARCH_SIGNAL_BASE_SCORES.get(signal_type, 1.0)
+    if market == "EU_HK":
+        base += 0.4
+    return base
+
+
+def _infer_currency(ticker: str, fundamentals: dict) -> str:
+    currency = (fundamentals.get("currency") or "").upper().strip()
+    if currency:
+        return currency
+
+    if "." in ticker:
+        _, suffix = ticker.rsplit(".", 1)
+        mapped = SUFFIX_CURRENCY_MAP.get(f".{suffix.upper()}")
+        if mapped:
+            return mapped
+
+    return "USD"
+
+
 async def _extract_tickers_with_llm(articles_text: str, signal_type: str, signal_reason: str) -> List[SignalTicker]:
     """Ask Claude to extract tickers from article content. Handles company names, EU/HK formats."""
     try:
@@ -170,6 +219,7 @@ async def _extract_tickers_with_llm(articles_text: str, signal_type: str, signal
                     signal_type=signal_type,
                     signal_reason=signal_reason,
                     market=market,
+                    signal_score=_search_signal_score(signal_type, market),
                 ))
         return result
     except Exception as e:
@@ -193,6 +243,7 @@ def _extract_tickers_with_regex(articles_text: str, signal_type: str, signal_rea
             signal_type=signal_type,
             signal_reason=signal_reason,
             market=market,
+            signal_score=_search_signal_score(signal_type, market),
         ))
 
     return result
@@ -393,10 +444,8 @@ async def run_deep_filter_with_diagnostics(
     top_signals = sorted(signals, key=lambda s: s.signal_score, reverse=True)[:15]
     held = {p.ticker for p in portfolio.positions}
 
-    from app.services.market.quotes import get_fx_rate
     from app.services.portfolio_service import get_settings
     fx_rates = await get_fx_rates(redis)
-    usd_czk = get_fx_rate("USD", fx_rates)
 
     settings = get_settings(user_id)
     max_positions = int(settings.get("max_positions", 20))
@@ -525,11 +574,13 @@ News:
                 reserve_ratio = min(reserve_ratio, 0.35)
             reserve_czk = round(size_czk * reserve_ratio / 1000) * 1000
 
-            price_usd = technicals.get("price")
+            currency = _infer_currency(ticker, fundamentals)
+            price_local = technicals.get("price")
             recommended_shares: Optional[int] = None
             reserve_shares: Optional[int] = None
-            if price_usd and price_usd > 0 and usd_czk > 0:
-                price_czk = price_usd * usd_czk
+            fx_rate = get_fx_rate(currency, fx_rates)
+            if price_local and price_local > 0 and fx_rate > 0:
+                price_czk = price_local * fx_rate
                 recommended_shares = int(size_czk / price_czk)
                 size_czk = round(recommended_shares * price_czk)
                 if reserve_czk > 0:
@@ -558,7 +609,8 @@ News:
                 sector=fundamentals.get("sector") or "",
                 industry=fundamentals.get("industry") or "",
                 exchange=fundamentals.get("exchange") or "",
-                current_price_usd=price_usd,
+                currency=currency,
+                current_price=price_local,
                 recommended_shares=recommended_shares,
                 reserve_shares=reserve_shares,
             ))

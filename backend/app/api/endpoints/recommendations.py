@@ -66,6 +66,11 @@ async def fx_rates_endpoint(
         "EUR_CZK": fx.get("EUR_CZK", 25.0),
         "GBP_CZK": fx.get("GBP_CZK", 29.0),
         "HKD_CZK": fx.get("HKD_CZK", 3.0),
+        "CHF_CZK": fx.get("CHF_CZK", 26.5),
+        "SEK_CZK": fx.get("SEK_CZK", 2.3),
+        "PLN_CZK": fx.get("PLN_CZK", 5.9),
+        "NOK_CZK": fx.get("NOK_CZK", 2.1),
+        "DKK_CZK": fx.get("DKK_CZK", 3.35),
     }
 
 

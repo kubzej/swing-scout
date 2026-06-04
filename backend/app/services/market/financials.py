@@ -32,6 +32,7 @@ async def get_fundamentals(redis, ticker: str) -> Dict:
         "exchange": None,
         "avg_volume": None,
         "quote_type": None,
+        "currency": None,
     }
 
     try:
@@ -50,6 +51,7 @@ async def get_fundamentals(redis, ticker: str) -> Dict:
             "exchange": info.get("exchange"),
             "avg_volume": info.get("averageDailyVolume10Day"),
             "quote_type": info.get("quoteType"),
+            "currency": info.get("currency") or info.get("financialCurrency"),
         })
     except Exception as e:
         logger.warning("Fundamentals fetch failed for %s: %s", ticker, e)

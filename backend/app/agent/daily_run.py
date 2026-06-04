@@ -20,6 +20,19 @@ from app.services.portfolio_service import get_portfolio_snapshot
 
 logger = logging.getLogger(__name__)
 
+CURRENCY_SYMBOL = {
+    "USD": "$",
+    "EUR": "€",
+    "GBP": "£",
+    "HKD": "HK$",
+    "CZK": "Kč",
+    "NOK": "kr",
+    "DKK": "kr",
+    "CHF": "CHF",
+    "SEK": "kr",
+    "PLN": "zł",
+}
+
 
 class RunIssueCollector(logging.Handler):
     """Collect warning/error records so the UI can surface degraded runs."""
@@ -273,7 +286,7 @@ async def _reevaluate_pending(db, redis, user_id: str):
 
     pending = (
         db.table('recommendations')
-        .select('id, ticker, recommended_price, action')
+        .select('id, ticker, recommended_price, action, options_details')
         .eq('user_id', user_id)
         .eq('status', 'pending')
         .execute()
@@ -288,6 +301,9 @@ async def _reevaluate_pending(db, redis, user_id: str):
         ticker = rec['ticker']
         rec_price = float(rec.get('recommended_price') or 0)
         current_price = quotes.get(ticker, {}).get('price')
+        options_details = rec.get('options_details') or {}
+        currency = str(options_details.get('currency') or 'USD').upper()
+        symbol = CURRENCY_SYMBOL.get(currency, f"{currency} ")
 
         if not current_price or not rec_price:
             continue
@@ -295,7 +311,10 @@ async def _reevaluate_pending(db, redis, user_id: str):
         change = abs(current_price - rec_price) / rec_price * 100
         if change >= 5:
             direction = 'vzrostla' if current_price > rec_price else 'klesla'
-            note = f"Cena {direction} o {change:.1f}% od doporučení (${rec_price:.2f} → ${current_price:.2f})"
+            note = (
+                f"Cena {direction} o {change:.1f}% od doporučení "
+                f"({symbol}{rec_price:.2f} → {symbol}{current_price:.2f})"
+            )
             db.table('recommendations').update({
                 'status': 'updated',
                 'price_update_note': note,

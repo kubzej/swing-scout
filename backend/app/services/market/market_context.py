@@ -17,9 +17,11 @@ from app.services.market.technical import get_technicals
 
 logger = logging.getLogger(__name__)
 
+MARKET_CONTEXT_CACHE_VERSION = "v2"
 CNN_FEAR_GREED_URL = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
 CNN_USER_AGENT = "Mozilla/5.0 (compatible; SwingScout/1.0)"
-CNN_CACHE_KEY = "ss:market_context:cnn_fear_greed"
+CNN_CACHE_KEY = f"ss:market_context:{MARKET_CONTEXT_CACHE_VERSION}:cnn_fear_greed"
+SHARED_CACHE_KEY = f"ss:market_context:{MARKET_CONTEXT_CACHE_VERSION}:shared"
 
 
 @dataclass
@@ -35,8 +37,11 @@ class MarketContext:
 def _load_shared_market_context(cached: Optional[str]) -> Optional[MarketContext]:
     if not cached:
         return None
-    data = json.loads(cached)
-    return MarketContext(**data)
+    try:
+        data = json.loads(cached)
+        return MarketContext(**data)
+    except Exception:
+        return None
 
 
 def _normalize_cnn_rating(raw_rating: Optional[str]) -> Optional[str]:
@@ -140,11 +145,19 @@ def _regime_from_signals(score: Optional[int], spy_trend: str, qqq_trend: str, i
 
 
 async def get_market_context(redis, user_id: str = None) -> MarketContext:
-    cache_key = "ss:market_context:shared"
-    cached = await redis.get(cache_key)
+    cached = await redis.get(SHARED_CACHE_KEY)
     cached_ctx = _load_shared_market_context(cached)
     if cached_ctx:
         fng_week_ago, fng_spike = await _load_fng_history_baseline(user_id, cached_ctx.fng_score)
+        log_event(
+            logger,
+            logging.INFO,
+            "market_context_cache_hit",
+            sentiment_source="cnn",
+            fng_score=cached_ctx.fng_score,
+            fng_label=cached_ctx.fng_label,
+            market_regime=cached_ctx.market_regime,
+        )
         return MarketContext(
             fng_score=cached_ctx.fng_score,
             fng_label=cached_ctx.fng_label,
@@ -209,5 +222,5 @@ async def get_market_context(redis, user_id: str = None) -> MarketContext:
         "spy_trend": ctx.spy_trend,
         "market_regime": ctx.market_regime,
     }
-    await redis.set(cache_key, json.dumps(ctx_dict), ex=CacheTTL.MARKET_CONTEXT)
+    await redis.set(SHARED_CACHE_KEY, json.dumps(ctx_dict), ex=CacheTTL.MARKET_CONTEXT)
     return ctx

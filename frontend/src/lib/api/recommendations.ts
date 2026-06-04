@@ -81,7 +81,7 @@ export async function rejectRecommendation(recId: string, reason?: string) {
   return response.json() as Promise<{ status: string; rec_id: string }>;
 }
 
-export async function fetchFxRates(): Promise<{ USD_CZK: number; EUR_CZK: number | null }> {
+export async function fetchFxRates(): Promise<Record<string, number>> {
   const headers = await getAuthHeader();
   const response = await fetch(`${API_URL}/api/recommendations/fx-rates`, { headers });
   if (!response.ok) throw new Error('Nepodařilo se načíst kurzy.');

@@ -20,6 +20,11 @@ FX_TICKERS = {
     "USD_CZK": "USDCZK=X",
     "EUR_CZK": "EURCZK=X",
     "GBP_CZK": "GBPCZK=X",
+    "CHF_CZK": "CHFCZK=X",
+    "SEK_CZK": "SEKCZK=X",
+    "PLN_CZK": "PLNCZK=X",
+    "NOK_CZK": "NOKCZK=X",
+    "DKK_CZK": "DKKCZK=X",
 }
 
 FX_DERIVED_TICKERS = {
@@ -158,6 +163,11 @@ async def get_fx_rates(redis) -> Dict[str, float]:
         "EUR_CZK": 25.0,
         "GBP_CZK": 29.0,
         "HKD_CZK": 3.0,
+        "CHF_CZK": 26.5,
+        "SEK_CZK": 2.3,
+        "PLN_CZK": 5.9,
+        "NOK_CZK": 2.1,
+        "DKK_CZK": 3.35,
     }
 
     try:
@@ -213,6 +223,11 @@ FX_FALLBACKS: Dict[str, float] = {
     "EUR_CZK": 25.0,
     "GBP_CZK": 29.0,
     "HKD_CZK": 3.0,
+    "CHF_CZK": 26.5,
+    "SEK_CZK": 2.3,
+    "PLN_CZK": 5.9,
+    "NOK_CZK": 2.1,
+    "DKK_CZK": 3.35,
 }
 
 

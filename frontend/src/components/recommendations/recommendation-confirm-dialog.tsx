@@ -15,7 +15,7 @@ interface RecommendationConfirmDialogProps {
 }
 
 const FX_FALLBACKS: Record<string, number> = {
-  USD: 23, EUR: 25, GBP: 29, HKD: 3,
+  USD: 23, EUR: 25, GBP: 29, HKD: 3, CHF: 26.5, SEK: 2.3, PLN: 5.9, NOK: 2.1, DKK: 3.35,
 };
 
 export function RecommendationConfirmDialog({

@@ -14,8 +14,6 @@ interface RecommendationCardProps {
   onReject?: (recommendation: RecommendationSummary) => void;
 }
 
-const USD_CZK_APPROX = 23;
-
 const CONFIDENCE_LABELS: Record<number, string> = {
   1: 'Spekulativní',
   2: 'Explorační',
@@ -53,7 +51,7 @@ export function RecommendationCard({
   const industry = (opts?.industry as string) || null;
   const exchange = (opts?.exchange as string) || null;
   const currency = (opts?.currency as string) || 'USD';
-  const priceUsd = (opts?.current_price_usd as number) || null;
+  const currentPrice = (opts?.current_price as number) || null;
   const recommendedShares = (opts?.recommended_shares as number) || null;
   const sourceType =
     recommendation.source_run_type ??
@@ -62,11 +60,7 @@ export function RecommendationCard({
     ? SOURCE_LABELS[sourceType] ?? sourceType
     : null;
 
-  const shares =
-    recommendedShares ??
-    (priceUsd && recommendation.recommended_size_czk
-      ? Math.round(recommendation.recommended_size_czk / (priceUsd * USD_CZK_APPROX))
-      : null);
+  const shares = recommendedShares;
 
   const showFitNote = portfolioFitNote && !isGenericFitNote(portfolioFitNote);
 
@@ -123,8 +117,8 @@ export function RecommendationCard({
             ) : null}
           </div>
           <div className="flex flex-wrap gap-x-5 gap-y-1">
-            {priceUsd ? (
-              <Stat label="Aktuální cena" value={formatCurrency(priceUsd, currency)} />
+            {currentPrice ? (
+              <Stat label="Aktuální cena" value={formatCurrency(currentPrice, currency)} />
             ) : null}
             {shares ? (
               <Stat label="Počet akcií" value={`${recommendedShares != null ? '' : '~'}${shares} ks`} />
