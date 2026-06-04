@@ -63,6 +63,8 @@ class ThesisResponse(BaseModel):
     last_thesis_check_summary: Optional[str]
     last_thesis_check_action_bias: Optional[str]
     last_thesis_check_urgency: Optional[str]
+    last_user_override_at: Optional[datetime]
+    last_user_override_summary: Optional[str]
     created_at: datetime
     updated_at: datetime
     events: List[ThesisEventResponse] = []

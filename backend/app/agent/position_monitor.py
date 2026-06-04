@@ -13,7 +13,7 @@ from app.ai.client import call_llm
 from app.services.portfolio_service import PortfolioSnapshot, PositionSnapshot
 from app.services.market.market_context import MarketContext
 from app.services.market.technical import get_technicals
-from app.services.thesis_service import create_thesis_event
+from app.services.thesis_service import create_thesis_event, is_override_active
 from app.search.client import format_results, search
 from app.core.supabase import get_supabase
 
@@ -35,7 +35,8 @@ Pravidla:
 - Add_candidate pouze když teze zůstává intact a pokles vypadá jako příležitost, ne thesis break.
 - Reduce_or_take_profit pouze když to sedí s původním profit-taking plánem nebo je catalyst z velké části odehraný.
 - Exit_now pokud zprávy/fundamenty přímo narušují důvod nákupu nebo invalidation podmínky.
-- Pokud nejsou čerstvé zprávy jasné, nehádej: status nech intact/weakening a action_bias watch/hold."""
+- Pokud nejsou čerstvé zprávy jasné, nehádej: status nech intact/weakening a action_bias watch/hold.
+- Pokud uživatel nedávno vědomě odmítl výstup (override níže), respektuj to: nedávej znovu reduce_or_take_profit ani exit_now, leda by přišla materiálně nová negativní informace (pak urgency=high)."""
 
 
 @dataclass
@@ -67,6 +68,7 @@ async def monitor_positions(
         )
         thesis = thesis_response.data[0] if thesis_response.data else None
         thesis_status = thesis.get("status", "intact") if thesis else "intact"
+        override_active = is_override_active(thesis)
         technicals = None
 
         if thesis and _needs_daily_thesis_assessment(pos, thesis, thesis_status):
@@ -77,6 +79,7 @@ async def monitor_positions(
                     thesis=thesis,
                     technicals=technicals,
                     market_context=market_context,
+                    override_summary=thesis.get("last_user_override_summary") if override_active else None,
                 )
                 thesis_status = _apply_thesis_assessment(db, thesis, assessment)
 
@@ -190,7 +193,26 @@ async def monitor_positions(
             except Exception:
                 pass
 
+        # User override: mute routine exit/reduce flags for this position unless a
+        # materially new high-urgency signal came up in this run.
+        if override_active:
+            flags = _apply_override_mute(flags, ticker)
+
     return flags
+
+
+# Exit/reduce flags that a fresh user override mutes (high-urgency still gets through).
+_MUTABLE_BY_OVERRIDE = {"exit_now", "thesis_delivered", "partial_profit", "zombie"}
+
+
+def _apply_override_mute(flags: List[PositionFlag], ticker: str) -> List[PositionFlag]:
+    kept: List[PositionFlag] = []
+    for f in flags:
+        if f.ticker == ticker and f.flag_type in _MUTABLE_BY_OVERRIDE and f.urgency != "high":
+            logger.info("Flag %s for %s muted by active user override", f.flag_type, ticker)
+            continue
+        kept.append(f)
+    return kept
 
 
 async def _assess_thesis_daily(
@@ -199,12 +221,18 @@ async def _assess_thesis_daily(
     thesis: dict,
     technicals: dict,
     market_context: MarketContext,
+    override_summary: Optional[str] = None,
 ) -> dict:
     try:
         news_results = await search(f"{pos.ticker} stock latest earnings guidance analyst news", max_results=3, days=7)
         news_context = format_results(news_results)
     except Exception:
         news_context = "Zadne vysledky nenalezeny."
+
+    override_block = (
+        f"\nUživatelský override (respektuj, neopakuj výstup bez nové info):\n{override_summary}"
+        if override_summary else ""
+    )
 
     user_prompt = f"""Ticker: {pos.ticker}
 Play type: {pos.play_type}
@@ -230,7 +258,7 @@ SMA50: {technicals.get('sma50')}
 SMA200: {technicals.get('sma200')}
 
 Fresh context:
-{news_context[:1200]}"""
+{news_context[:1200]}{override_block}"""
 
     response = await call_llm(THESIS_CHECK_PROMPT, user_prompt, max_tokens=260, label=f'daily_thesis_check:{pos.ticker}')
     parsed = _parse_json_object(response)

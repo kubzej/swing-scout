@@ -12,6 +12,8 @@ from app.services.portfolio_service import PortfolioSnapshot
 from app.services.market.market_context import MarketContext
 from app.core.run_logging import log_event
 from app.core.supabase import get_supabase
+from app.services import sizing
+from app.services.thesis_service import get_add_context
 
 logger = logging.getLogger(__name__)
 
@@ -163,21 +165,45 @@ def build_recommendations_with_diagnostics(
         if not pos:
             continue
 
-        if flag.flag_type == "add_trigger" and available_cash >= 15000:
+        if flag.flag_type == "add_trigger":
             if flag.ticker in active_entry_recommendations:
                 logger.info('Skipping %s add flag — active entry recommendation already exists', flag.ticker)
                 record_skip('active_entry_recommendation', flag.ticker, 'add_flag')
                 log_event(logger, logging.INFO, 'recommendation_flag_skipped', ticker=flag.ticker, flag_type=flag.flag_type, reason='active_entry_recommendation')
                 continue
 
-            thesis_snapshot = _load_thesis_snapshot(db, user_id, pos.id)
+            add_ctx = get_add_context(db, user_id, pos.id)
+            tranche_count = add_ctx["tranche_count"]
+            confidence = add_ctx["confidence"]
+
+            # Cap tranches per name.
+            if tranche_count >= sizing.MAX_TRANCHES:
+                record_skip('max_tranches', flag.ticker, f'tranches={tranche_count}')
+                log_event(logger, logging.INFO, 'recommendation_flag_skipped', ticker=flag.ticker, flag_type=flag.flag_type, reason='max_tranches')
+                continue
+
+            # Concentration cap: don't let a name exceed CAP_PCT of portfolio.
+            cap_czk = sizing.position_cap_czk(total_portfolio_value, confidence)
+            cost_basis_czk = pos.cost_czk
+            room_czk = round((cap_czk - cost_basis_czk) / 1000) * 1000
+            if room_czk <= 0:
+                record_skip('position_cap_reached', flag.ticker, f'cost_basis={cost_basis_czk:.0f} cap={cap_czk:.0f}')
+                log_event(logger, logging.INFO, 'recommendation_flag_skipped', ticker=flag.ticker, flag_type=flag.flag_type, reason='position_cap_reached')
+                continue
+
+            add_size = min(sizing.add_size_czk(total_portfolio_value, confidence), room_czk)
+            if add_size <= 0 or available_cash < add_size:
+                record_skip('insufficient_cash', flag.ticker, f'add_flag available_cash={available_cash:.0f} add_size={add_size:.0f}')
+                log_event(logger, logging.INFO, 'recommendation_flag_skipped', ticker=flag.ticker, flag_type=flag.flag_type, reason='insufficient_cash')
+                continue
+
             recommendations.append({
                 "ticker": flag.ticker,
                 "action": "add",
                 "play_type": pos.play_type,
-                "confidence": 3,
+                "confidence": confidence,
                 "recommended_price": None,
-                "recommended_size_czk": 17000,
+                "recommended_size_czk": add_size,
                 "add_reserve_czk": 0,
                 "thesis_text": flag.detail,
                 "exit_conditions": "Stejné jako původní thesis.",
@@ -186,11 +212,13 @@ def build_recommendations_with_diagnostics(
                     "source": "daily_position_monitor",
                     "flag_type": flag.flag_type,
                     "current_pnl_pct": pos.unrealized_pnl_pct,
-                    "source_thesis_snapshot": thesis_snapshot,
+                    "tranche_number": tranche_count + 1,
+                    "position_cap_czk": cap_czk,
+                    "source_thesis_snapshot": add_ctx["thesis_snapshot"],
                 },
             })
             diagnostics["flag_recommendations"] += 1
-            available_cash -= 17000
+            available_cash -= add_size
 
         elif flag.flag_type in ("exit_now", "zombie"):
             recommendations.append({
@@ -379,16 +407,3 @@ def _get_watchlist_age(db, user_id: str, ticker: str) -> Optional[int]:
         return None
 
 
-def _load_thesis_snapshot(db, user_id: str, position_id: str) -> Optional[dict]:
-    """Load current thesis fields for an add recommendation's context."""
-    try:
-        response = (
-            db.table("theses")
-            .select("invalidation_conditions, profit_taking_plan, monitoring_focus, holding_horizon, entry_thesis, status")
-            .eq("user_id", user_id)
-            .eq("position_id", position_id)
-            .execute()
-        )
-        return response.data[0] if response.data else None
-    except Exception:
-        return None

@@ -17,8 +17,10 @@ from app.core.run_logging import bind_run_context, log_event, reset_run_context
 from app.core.supabase import get_supabase
 from app.search.client import format_results, search
 from app.services.market.market_context import get_market_context
-from app.services.market.quotes import get_intraday_quotes
+from app.services.market.quotes import get_intraday_quotes, get_fx_rates, get_fx_rate
 from app.services.portfolio_service import get_portfolio_snapshot
+from app.services import sizing
+from app.services.thesis_service import get_add_context, is_override_active
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +70,7 @@ async def run_intraday(user_id: str) -> int:
 
         stage_started = perf_counter()
         quotes = await get_intraday_quotes(redis, tickers)
+        fx = await get_fx_rates(redis)
         market_ctx = await get_market_context(redis, user_id)
         log_event(
             logger,
@@ -108,6 +111,8 @@ async def run_intraday(user_id: str) -> int:
                     direction=direction,
                     move_context=move_context,
                     thesis_context=thesis_context,
+                    fx=fx,
+                    portfolio_value=portfolio.total_value_czk,
                 )
                 if rec:
                     recommendations.append(rec)
@@ -154,6 +159,8 @@ async def run_intraday(user_id: str) -> int:
                 change_pct=change_pct,
                 direction=direction,
                 move_context=move_context,
+                fx=fx,
+                portfolio_value=portfolio.total_value_czk,
             )
             if rec:
                 recommendations.append(rec)
@@ -232,7 +239,7 @@ Fresh search context:
     }
 
 
-def _build_position_recommendation(*, db, user_id: str, pos, quote: dict, change_pct: float, direction: str, move_context: dict, thesis_context: dict | None) -> dict | None:
+def _build_position_recommendation(*, db, user_id: str, pos, quote: dict, change_pct: float, direction: str, move_context: dict, thesis_context: dict | None, fx: dict, portfolio_value: float) -> dict | None:
     thesis_risk = move_context.get("thesis_risk", "unknown")
     action_bias = move_context.get("action_bias", "watch_only")
     cause_category = move_context.get("cause_category", "unknown")
@@ -245,15 +252,28 @@ def _build_position_recommendation(*, db, user_id: str, pos, quote: dict, change
             exit_conditions = 'Prodat celou pozici.'
             prefix = 'Intraday risk trigger'
         elif pos.play_type in ('A', 'B') and thesis_risk == 'low' and action_bias == 'add_ok':
+            # Add sizing mirrors the daily tranche model: same per-name tranche + concentration caps.
+            add_ctx = get_add_context(db, user_id, pos.id)
+            if add_ctx["tranche_count"] >= sizing.MAX_TRANCHES:
+                log_event(logger, logging.INFO, 'intraday_item_skipped', ticker=pos.ticker, reason='max_tranches', tranches=add_ctx["tranche_count"])
+                return None
             action = 'add'
-            confidence = 3
-            size = 17000
+            confidence = add_ctx["confidence"]
+            cap_czk = sizing.position_cap_czk(portfolio_value, confidence)
+            room_czk = round((cap_czk - pos.cost_czk) / 1000) * 1000
+            if room_czk <= 0:
+                log_event(logger, logging.INFO, 'intraday_item_skipped', ticker=pos.ticker, reason='position_cap_reached', cost_basis=round(pos.cost_czk), cap=cap_czk)
+                return None
+            size = min(sizing.add_size_czk(portfolio_value, confidence), room_czk)
+            if size <= 0:
+                log_event(logger, logging.INFO, 'intraday_item_skipped', ticker=pos.ticker, reason='add_size_zero')
+                return None
             exit_conditions = 'Stejné jako původní thesis; znovu ověřit při dalším denním běhu.'
             prefix = 'Intraday add trigger'
         else:
             return None
     elif change_pct >= 5:
-        profit_plan = ((thesis_context or {}).get("strategy") or {}).get("profit_taking_plan")
+        profit_plan = (thesis_context or {}).get("profit_taking_plan")
         if action_bias != 'take_profit_ok' or not profit_plan or change_pct < 10:
             return None
         action = 'sell'
@@ -264,9 +284,17 @@ def _build_position_recommendation(*, db, user_id: str, pos, quote: dict, change
     else:
         return None
 
+    # Respect a fresh user override: don't nag the same exit/reduce unless risk is high.
+    if action in ('sell', 'exit') and is_override_active(thesis_context) and thesis_risk != 'high':
+        log_event(logger, logging.INFO, 'intraday_item_skipped', ticker=pos.ticker, reason='user_override_active', action=action)
+        return None
+
     if _has_active_recommendation(db, user_id, pos.ticker, action):
         log_event(logger, logging.INFO, 'intraday_item_skipped', ticker=pos.ticker, reason='active_recommendation_exists', action=action)
         return None
+
+    currency = pos.currency or "USD"
+    recommended_shares = _intraday_recommended_shares(size, quote.get('price'), currency, fx)
 
     return {
         'ticker': pos.ticker,
@@ -286,11 +314,14 @@ def _build_position_recommendation(*, db, user_id: str, pos, quote: dict, change
         ),
         'exit_conditions': exit_conditions,
         'is_options_play': False,
-        'options_details': _intraday_options_details(quote, change_pct, move_context, cause_category, thesis_context),
+        'options_details': _intraday_options_details(
+            quote, change_pct, move_context, cause_category, thesis_context,
+            currency=currency, recommended_shares=recommended_shares,
+        ),
     }
 
 
-def _build_watchlist_recommendation(*, db, user_id: str, watch_item: dict, quote: dict, change_pct: float, direction: str, move_context: dict) -> dict | None:
+def _build_watchlist_recommendation(*, db, user_id: str, watch_item: dict, quote: dict, change_pct: float, direction: str, move_context: dict, fx: dict, portfolio_value: float) -> dict | None:
     ticker = watch_item["ticker"].upper()
     cause_category = move_context.get("cause_category", "unknown")
     thesis_risk = move_context.get("thesis_risk", "unknown")
@@ -306,13 +337,19 @@ def _build_watchlist_recommendation(*, db, user_id: str, watch_item: dict, quote
         log_event(logger, logging.INFO, 'intraday_watchlist_skipped', ticker=ticker, reason='active_buy_recommendation_exists')
         return None
 
+    # Intraday watchlist buys default to USD (no fundamentals fetch); confirm flow can override.
+    # Starter entry sized by the shared tranche model at confidence 2 (speculative intraday).
+    currency = "USD"
+    size = sizing.entry_size_czk(portfolio_value, 2)
+    recommended_shares = _intraday_recommended_shares(size, quote.get('price'), currency, fx)
+
     return {
         'ticker': ticker,
         'action': 'buy',
         'play_type': 'C' if cause_category in ("positive_catalyst", "analyst_or_sector_move") else 'B',
         'confidence': 2,
         'recommended_price': quote.get('price') or 0,
-        'recommended_size_czk': 20000,
+        'recommended_size_czk': size,
         'add_reserve_czk': 0,
         'thesis_text': _intraday_thesis_text(
             ticker=ticker,
@@ -324,7 +361,10 @@ def _build_watchlist_recommendation(*, db, user_id: str, watch_item: dict, quote
         ),
         'exit_conditions': 'Pouze malý starter; odmítnout pokud se catalyst nepotvrdí nebo momentum do close vyprchá.',
         'is_options_play': False,
-        'options_details': _intraday_options_details(quote, change_pct, move_context, cause_category),
+        'options_details': _intraday_options_details(
+            quote, change_pct, move_context, cause_category,
+            currency=currency, recommended_shares=recommended_shares,
+        ),
     }
 
 
@@ -365,6 +405,8 @@ def _load_position_thesis(db, user_id: str, position_id: str) -> dict | None:
         "add_plan": thesis.get("add_plan"),
         "exit_plan": thesis.get("exit_plan"),
         "play_type": thesis.get("play_type"),
+        "last_user_override_at": thesis.get("last_user_override_at"),
+        "last_user_override_summary": thesis.get("last_user_override_summary"),
     }
 
 
@@ -392,7 +434,29 @@ def _intraday_thesis_text(*, ticker: str, direction: str, change_pct: float, quo
     return f'{prefix}: {ticker} {direction} {abs(change_pct):.1f}% od dnešního intraday open {price_part}. Kontext: {summary}'
 
 
-def _intraday_options_details(quote: dict, change_pct: float, move_context: dict, cause_category: str, thesis_context: dict | None = None) -> dict:
+def _intraday_recommended_shares(size_czk: float, price_local, currency: str, fx: dict) -> int | None:
+    """Whole-share count for an intraday recommendation, mirroring the confirm-flow math."""
+    if not size_czk or size_czk <= 0 or not price_local or price_local <= 0:
+        return None
+    fx_rate = get_fx_rate(currency, fx)
+    if fx_rate <= 0:
+        return None
+    price_czk = price_local * fx_rate
+    if price_czk <= 0:
+        return None
+    return int(size_czk / price_czk)
+
+
+def _intraday_options_details(
+    quote: dict,
+    change_pct: float,
+    move_context: dict,
+    cause_category: str,
+    thesis_context: dict | None = None,
+    *,
+    currency: str | None = None,
+    recommended_shares: int | None = None,
+) -> dict:
     details = {
         "source": "intraday_price_move",
         "intraday_open": quote.get("intraday_open"),
@@ -403,6 +467,10 @@ def _intraday_options_details(quote: dict, change_pct: float, move_context: dict
         "move_summary": move_context.get("summary"),
         "raw_news_context": move_context.get("raw_news_context"),
     }
+    if currency:
+        details["currency"] = currency
+    if recommended_shares is not None:
+        details["recommended_shares"] = recommended_shares
     if thesis_context:
         details["thesis_status"] = thesis_context.get("status")
         details["thesis_profit_taking_plan"] = thesis_context.get("profit_taking_plan")

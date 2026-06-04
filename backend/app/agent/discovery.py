@@ -23,6 +23,7 @@ from app.services.market.alpha_vantage import get_top_movers
 from app.services.market.technical import get_technicals
 from app.services.market.earnings import get_upcoming_earnings
 from app.services.market.quotes import get_fx_rate, get_fx_rates
+from app.services import sizing
 from app.services.market.market_context import MarketContext
 from app.services.portfolio_service import PortfolioSnapshot
 from app.ai.client import call_llm
@@ -474,7 +475,6 @@ async def run_deep_filter_with_diagnostics(
     settings = get_settings(user_id)
     max_positions = int(settings.get("max_positions", 20))
     total_portfolio_value = portfolio.total_value_czk
-    base_size_czk = total_portfolio_value * 0.80 / max_positions
     log_event(
         logger,
         logging.INFO,
@@ -482,7 +482,8 @@ async def run_deep_filter_with_diagnostics(
         total_portfolio_value=round(total_portfolio_value, 2),
         cash_czk=round(portfolio.cash_czk, 2),
         max_positions=max_positions,
-        base_size_czk=round(base_size_czk, 2),
+        entry_size_full_conviction=sizing.entry_size_czk(total_portfolio_value, 4),
+        position_cap_full_conviction=sizing.position_cap_czk(total_portfolio_value, 4),
         market_regime=market_context.market_regime,
     )
 
@@ -608,14 +609,13 @@ News:
                 })
                 continue
 
-            confidence_multiplier = {4: 1.3, 3: 1.0, 2: 0.75, 1: 0.5}.get(confidence, 1.0)
+            # Tranche sizing: first buy = ENTRY_PCT of portfolio, scaled by confidence.
+            # Adds (remaining tranches) are sized later at confirm/add time.
+            size_czk = sizing.entry_size_czk(total_portfolio_value, confidence)
+            reserve_czk = sizing.add_reserve_czk(total_portfolio_value, confidence)
             if bear_regime:
-                confidence_multiplier *= 0.7
-            size_czk = round(base_size_czk * confidence_multiplier / 1000) * 1000
-            reserve_ratio = {4: 0.60, 3: 0.60, 2: 0.50, 1: 0.0}.get(confidence, 0.5)
-            if bear_regime:
-                reserve_ratio = min(reserve_ratio, 0.35)
-            reserve_czk = round(size_czk * reserve_ratio / 1000) * 1000
+                size_czk = round(size_czk * 0.7 / 1000) * 1000
+                reserve_czk = round(reserve_czk * 0.7 / 1000) * 1000
 
             currency = _infer_currency(ticker, fundamentals)
             price_local = technicals.get("price")

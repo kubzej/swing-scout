@@ -34,6 +34,8 @@ export interface ThesisResponse {
   last_thesis_check_summary: string | null;
   last_thesis_check_action_bias: string | null;
   last_thesis_check_urgency: string | null;
+  last_user_override_at: string | null;
+  last_user_override_summary: string | null;
   created_at: string;
   updated_at: string | null;
   events: ThesisEvent[];

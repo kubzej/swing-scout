@@ -59,6 +59,9 @@ CREATE TABLE theses (
   last_thesis_check_summary TEXT,
   last_thesis_check_action_bias TEXT,
   last_thesis_check_urgency TEXT,
+  -- user override (rejecting an exit/reduce on a held position)
+  last_user_override_at TIMESTAMPTZ,
+  last_user_override_summary TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

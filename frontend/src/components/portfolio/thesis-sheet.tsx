@@ -150,6 +150,8 @@ const KIND_LABELS: Record<string, string> = {
   daily_check: 'Denní check',
   manual_update: 'Ruční aktualizace',
   status_change: 'Změna statusu',
+  rejected_exit: 'Odmítnut výstup',
+  rejected_add: 'Odmítnuto přikoupení',
 };
 
 function EventKindBadge({ kind }: { kind: string }) {

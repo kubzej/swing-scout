@@ -339,7 +339,7 @@ async def reject_recommendation(
 
     rec = (
         db.table("recommendations")
-        .select("id, status, ticker")
+        .select("id, status, ticker, action")
         .eq("id", rec_id)
         .eq("user_id", user_id)
         .execute()
@@ -350,12 +350,46 @@ async def reject_recommendation(
         raise HTTPException(status_code=400, detail="Doporučení již bylo zpracováno")
 
     ticker = rec.data[0].get("ticker", "")
+    action = rec.data[0].get("action", "")
 
     db.table("recommendations").update({
         "status": "rejected",
         "rejection_reason": data.reason,
         "rejected_at": datetime.now(timezone.utc).isoformat(),
     }).eq("id", rec_id).execute()
+
+    # Rejecting a sell/exit/add on a held position is a thesis-level decision.
+    # Record it as an audit event; for exits, also set an override that mutes routine
+    # exit/reduce flags for a few days so the agent doesn't re-flag the same exit.
+    if ticker and action in ("sell", "exit", "add"):
+        try:
+            pos = (
+                db.table("positions").select("id")
+                .eq("user_id", user_id).eq("ticker", ticker).eq("status", "open")
+                .execute()
+            )
+            if pos.data:
+                thesis = get_current_thesis(db, user_id, pos.data[0]["id"])
+                if thesis:
+                    is_exit_reject = action in ("sell", "exit")
+                    reason_text = data.reason or ("Uživatel odmítl výstup." if is_exit_reject else "Uživatel odmítl přikoupení.")
+                    create_thesis_event(
+                        db,
+                        thesis=thesis,
+                        kind="rejected_exit" if is_exit_reject else "rejected_add",
+                        text=reason_text,
+                        payload={"recommendation_id": rec_id, "action": action},
+                        status_before=thesis.get("status", "intact"),
+                        status_after=thesis.get("status", "intact"),
+                    )
+                    if is_exit_reject:
+                        db.table("theses").update({
+                            "last_user_override_at": datetime.now(timezone.utc).isoformat(),
+                            "last_user_override_summary": reason_text,
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        }).eq("id", thesis["id"]).execute()
+        except Exception as e:
+            logger.warning("Thesis override/reject event failed for %s: %s", ticker, e)
 
     if ticker:
         try:

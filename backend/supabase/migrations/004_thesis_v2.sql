@@ -23,7 +23,9 @@ ALTER TABLE theses
   ADD COLUMN IF NOT EXISTS last_thesis_check_at TIMESTAMPTZ,
   ADD COLUMN IF NOT EXISTS last_thesis_check_summary TEXT,
   ADD COLUMN IF NOT EXISTS last_thesis_check_action_bias TEXT,
-  ADD COLUMN IF NOT EXISTS last_thesis_check_urgency TEXT;
+  ADD COLUMN IF NOT EXISTS last_thesis_check_urgency TEXT,
+  ADD COLUMN IF NOT EXISTS last_user_override_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS last_user_override_summary TEXT;
 
 -- One thesis per open position — enforced at DB level.
 -- _upsert_position always inserts a fresh positions row on re-buy, so position_id is never reused.
