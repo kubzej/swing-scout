@@ -158,17 +158,22 @@ CLASSIFICATION_PROMPT = """Jsi portfolio analytik. Na základě informací o akc
    - 3: střední — více shodujících se indikátorů (technicals + fundamentals + narrativ)
    - 4: silné — vše se shoduje: technicals bullish, fundamentals solidní, jasný katalyzátor, momentum potvrzuje. Dávej pouze výjimečně.
 
-3. Krátká investiční teze (max 100 slov, česky)
-4. Invalidation podmínky — kdy je teze špatně a pozici zavřít / výrazně omezit
-5. Profit-taking plán — kdy vybírat zisky, ideálně staged a podle typu hry
-6. Holding horizon — stručně: dny / týdny / měsíce a proč
-7. Monitoring focus — co přesně dál sledovat po vstupu
-8. Důvod vstupu (1 věta, česky)
+3. Krátká investiční teze (max 45 slov, česky)
+4. Invalidation podmínky (max 30 slov)
+5. Profit-taking plán (max 35 slov)
+6. Holding horizon (max 15 slov)
+7. Monitoring focus (max 25 slov)
+8. Důvod vstupu (max 20 slov, 1 věta)
 
 Pravidla pro exit podle typu hry:
 - Type A: hlavní osa je thesis break nebo thesis delivered. Nepiš jen technický stop-loss.
 - Type B: hlavní osa je catalyst played out / catalyst failed / time condition.
 - Type C: hlavní osa je aktivní staged profit-taking + rychlá invalidace při ztrátě momentum.
+
+KRITICKÉ:
+- Vrať POUZE jeden JSON objekt.
+- Bez markdownu, bez code fence, bez vysvětlení před ani po JSON.
+- Buď velmi stručný. Neopakuj stejné informace mezi poli.
 
 Odpověz ve formátu JSON:
 {"play_type": "A|B|C", "confidence": 1-4, "thesis": "...", "invalidation_conditions": "...", "profit_taking_plan": "...", "holding_horizon": "...", "monitoring_focus": "...", "entry_rationale": "..."}
@@ -523,10 +528,29 @@ Portfolio fit: {fit_note}
 News:
 {news_context[:600]}"""
 
-            response_text = await call_llm(CLASSIFICATION_PROMPT, context_for_llm, max_tokens=400, label=f'stage2_classification:{ticker}')
+            response_text = await call_llm(CLASSIFICATION_PROMPT, context_for_llm, max_tokens=700, label=f'stage2_classification:{ticker}')
             classification = _parse_classification(response_text)
 
-            if not classification or classification.get("skip"):
+            if not classification:
+                diagnostics['llm_skip'] += 1
+                record_rejection('llm_parse_failed', ticker, _preview_llm_response(response_text))
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    'stage2_ticker_skipped',
+                    ticker=ticker,
+                    reason='llm_parse_failed',
+                    response_preview=_preview_llm_response(response_text),
+                )
+                watchlist_adds.append({
+                    "ticker": ticker,
+                    "stage": "watching",
+                    "signal_reason": sig.signal_reason,
+                    "theme": None,
+                })
+                continue
+
+            if classification.get("skip"):
                 diagnostics['llm_skip'] += 1
                 record_rejection('llm_skip', ticker)
                 log_event(logger, logging.INFO, 'stage2_ticker_skipped', ticker=ticker, reason='llm_skip')
@@ -679,10 +703,31 @@ def _check_portfolio_fit(ticker: str, fundamentals: dict, portfolio: PortfolioSn
 
 def _parse_classification(text: str) -> Optional[dict]:
     import re
+
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return None
+
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+
     try:
-        match = re.search(r'\{.*\}', text, re.DOTALL)
+        return json.loads(cleaned)
+    except Exception:
+        pass
+
+    try:
+        match = re.search(r'\{.*\}', cleaned, re.DOTALL)
         if match:
             return json.loads(match.group())
     except Exception:
         pass
     return None
+
+
+def _preview_llm_response(text: str, limit: int = 220) -> str:
+    compact = " ".join((text or "").split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3] + "..."
