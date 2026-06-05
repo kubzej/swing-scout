@@ -539,7 +539,11 @@ async def run_deep_filter_with_diagnostics(
 
             technicals = await get_technicals(redis, ticker)
             upcoming = await get_upcoming_earnings(redis, [ticker], days=7)
-            has_upcoming_earnings = ticker in upcoming
+            earnings_date = upcoming.get(ticker)
+            earnings_line = (
+                f"{earnings_date.isoformat()} (do 7 dní)" if earnings_date
+                else "žádné v příštích 7 dnech"
+            )
 
             news_results = await search(f"{ticker} stock news why moving catalyst earnings", max_results=4, days=10)
             news_context = format_results(news_results)
@@ -551,7 +555,7 @@ async def run_deep_filter_with_diagnostics(
 Signal: {sig.signal_type} — {sig.signal_reason}
 Fundamentals: PE={fundamentals.get('pe')}, revenue_growth={fundamentals.get('revenue_growth')}, sector={fundamentals.get('sector')}, country={fundamentals.get('country')}, market_cap={fundamentals.get('market_cap')}
 Technicals: RSI={technicals.get('rsi14')}, trend={technicals.get('trend_signal')}, SMA50={technicals.get('sma50')}, SMA200={technicals.get('sma200')}
-Upcoming earnings (7d): {'ANO' if has_upcoming_earnings else 'NE'}
+Nejbližší earnings: {earnings_line}
 Market regime: {market_context.market_regime} (sentiment score: {market_context.fng_score})
 Portfolio fit: {fit_note}
 

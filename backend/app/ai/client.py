@@ -1,6 +1,7 @@
 """LiteLLM client — single call interface for all Claude API calls."""
 import logging
 import os
+from datetime import datetime, timezone
 from time import perf_counter
 
 import litellm
@@ -14,6 +15,24 @@ settings = get_settings()
 litellm.set_verbose = False
 
 
+def _temporal_context() -> str:
+    """Current date/time anchor prepended to every system prompt.
+
+    Without it the model has no 'now' and treats stale news (past earnings,
+    old announcements) as future events. Cheap to include, useful everywhere.
+    """
+    now_utc = datetime.now(timezone.utc)
+    parts = [f"Aktuální čas: {now_utc:%Y-%m-%d %H:%M} UTC ({now_utc:%A})."]
+    try:
+        from zoneinfo import ZoneInfo
+        et = now_utc.astimezone(ZoneInfo("America/New_York"))
+        parts.append(f"US burza (ET): {et:%Y-%m-%d %H:%M}.")
+    except Exception:
+        pass
+    parts.append("Cokoliv s dřívějším datem je minulost — neber to jako budoucí událost.")
+    return " ".join(parts)
+
+
 async def call_llm(
     system_prompt: str,
     user_prompt: str,
@@ -24,6 +43,8 @@ async def call_llm(
     label = label or 'anonymous'
     requested_max_tokens = max_tokens or settings.ai_max_tokens
     os.environ['ANTHROPIC_API_KEY'] = settings.anthropic_api_key
+
+    system_prompt = f"{_temporal_context()}\n\n{system_prompt}"
 
     log_event(
         logger,
