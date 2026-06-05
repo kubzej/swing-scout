@@ -42,6 +42,7 @@ Required backend values:
 
 Optional backend tuning:
 
+- `AI_MODEL`
 - `SEARCH_PROVIDER`
 - `SEARCH_FALLBACK_PROVIDER`
 - `SEARCH_MAX_CONCURRENCY`
