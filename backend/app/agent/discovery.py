@@ -71,6 +71,11 @@ TICKER_STOPWORDS = {
     "FDA", "GDP", "GLD", "HK", "IPO", "NYSE", "QQQ", "SEC", "SPY", "TLT",
     "USD", "VIX", "WSJ",
 }
+INDEX_TICKERS = {
+    "STI", "SPX", "SPY", "NDX", "DJIA", "DJI", "RUT", "VIX", "FTSE", "DAX",
+    "CAC", "HSI", "NKY", "N225", "KOSPI", "SENSEX", "NIFTY", "STOXX", "SX5E",
+    "MSCI", "ASX", "TSX", "IBEX", "AEX", "SMI", "OMX",
+}
 TICKER_NOISE_WORDS = {
     "ABOUT", "ABOVE", "ACQUI", "AFTER", "ALERT", "BREAK", "CHINA", "CLOSE",
     "DAY", "DEAL", "DROPS", "EROCK", "FRESH", "GROUP", "GROUPS", "INDEX",
@@ -165,6 +170,7 @@ CLASSIFICATION_PROMPT = """Jsi portfolio analytik. Na základě informací o akc
 6. Holding horizon (max 15 slov)
 7. Monitoring focus (max 25 slov)
 8. Důvod vstupu (max 20 slov, 1 věta)
+9. watch_note (VŽDY vyplň — i když skipuješ): max 30 slov, česky. Proč je akcie zajímavá ke sledování a na jaké konkrétní potvrzení čekáme, než bychom zvážili nákup. Konkrétní vlastní text, ne titulek ani citace headline.
 
 Pravidla pro exit podle typu hry:
 - Type A: hlavní osa je thesis break nebo thesis delivered. Nepiš jen technický stop-loss.
@@ -173,10 +179,10 @@ Pravidla pro exit podle typu hry:
 
 Pravidla pro nákup:
 - Signal není nákup. Nákup doporuč jen pokud je jasné proč právě teď otevřít pozici.
-- Pokud chybí konkrétní teze, catalyst, entry rationale nebo invalidace, vrať {"skip": true}.
+- Pokud chybí konkrétní teze, catalyst, entry rationale nebo invalidace, vrať {"skip": true, "watch_note": "..."}.
 - Velký denní pokles není sám o sobě dip-buy. Musí být jasné, proč pokles nerozbíjí tezi.
 - Velký denní růst není sám o sobě momentum-buy. Nesmí to být jen chasing po hot news.
-- Pokud je lepší akcii jen sledovat nebo počkat na další potvrzení, vrať {"skip": true}.
+- Pokud je lepší akcii jen sledovat nebo počkat na další potvrzení, vrať {"skip": true, "watch_note": "..."}.
 
 KRITICKÉ:
 - Vrať POUZE jeden JSON objekt.
@@ -184,9 +190,9 @@ KRITICKÉ:
 - Buď velmi stručný. Neopakuj stejné informace mezi poli.
 
 Odpověz ve formátu JSON:
-{"play_type": "A|B|C", "confidence": 1-4, "thesis": "...", "invalidation_conditions": "...", "profit_taking_plan": "...", "holding_horizon": "...", "monitoring_focus": "...", "entry_rationale": "..."}
+{"play_type": "A|B|C", "confidence": 1-4, "thesis": "...", "invalidation_conditions": "...", "profit_taking_plan": "...", "holding_horizon": "...", "monitoring_focus": "...", "entry_rationale": "...", "watch_note": "..."}
 
-Pokud akcie nesplňuje kritéria (meme, pink sheet, bez teze), odpověz: {"skip": true}
+Pokud akcie nesplňuje kritéria (meme, pink sheet, bez teze), odpověz: {"skip": true, "watch_note": "..."}
 
 Nepoužívej emojis v žádném z textových polí."""
 
@@ -324,7 +330,7 @@ def _normalize_search_ticker_candidate(raw_ticker: Any) -> Optional[str]:
     ticker = raw_ticker.strip().upper().strip(".,:;!?)(")
     if not ticker:
         return None
-    if ticker in TICKER_STOPWORDS or ticker in TICKER_NOISE_WORDS:
+    if ticker in TICKER_STOPWORDS or ticker in TICKER_NOISE_WORDS or ticker in INDEX_TICKERS:
         return None
 
     if "." in ticker:
@@ -355,10 +361,12 @@ def _extract_signals_from_alpha_vantage(payload: dict) -> List[SignalTicker]:
         return []
 
     signals: List[SignalTicker] = []
+    # most_active alone is no edge — it is always the same liquid mega-caps with no
+    # catalyst, so it scores low and only matters when it overlaps a real mover.
     sections = [
         ("top_gainers", "top_gainer", 3.0),
         ("top_losers", "top_loser", 2.5),
-        ("most_actively_traded", "most_active", 2.0),
+        ("most_actively_traded", "most_active", 1.2),
     ]
 
     for field, signal_type, base_score in sections:
@@ -377,7 +385,9 @@ def _extract_signals_from_alpha_vantage(payload: dict) -> List[SignalTicker]:
             if field != "most_actively_traded" and (change_pct is None or abs(change_pct) < ALPHA_VANTAGE_MIN_MOVE_PCT):
                 continue
 
-            score_bonus = min((abs(change_pct or 0) / 25.0), 2.0) + min(volume / 100_000_000, 1.5)
+            # Reward the size of the move; keep raw liquidity a minor tiebreaker so
+            # mega-cap volume can't outrank a genuine catalyst.
+            score_bonus = min((abs(change_pct or 0) / 25.0), 2.0) + min(volume / 200_000_000, 0.8)
             direction = "růst" if (change_pct or 0) >= 0 else "pokles"
             reason = f"Alpha Vantage {signal_type}: {direction} {change_pct or 0:.1f}% na objemu {volume:,}"
 
@@ -453,11 +463,11 @@ async def run_deep_filter_with_diagnostics(
     redis,
     user_id: str,
 ) -> tuple[List[Candidate], dict[str, Any]]:
-    """Stage 2 — filter top 15 signals to 5-10 actionable candidates with thesis."""
+    """Stage 2 — filter top 20 signals to 5-10 actionable candidates with thesis."""
     top_discovery_signals = [
         signal for signal in sorted(signals, key=lambda s: s.signal_score, reverse=True)
         if not signal.signal_type.startswith("watchlist_")
-    ][:15]
+    ][:20]
     watchlist_signals = [
         signal for signal in signals
         if signal.signal_type.startswith("watchlist_")
@@ -531,7 +541,7 @@ async def run_deep_filter_with_diagnostics(
             upcoming = await get_upcoming_earnings(redis, [ticker], days=7)
             has_upcoming_earnings = ticker in upcoming
 
-            news_results = await search(f"{ticker} stock news analysis", max_results=3, days=14)
+            news_results = await search(f"{ticker} stock news why moving catalyst earnings", max_results=4, days=10)
             news_context = format_results(news_results)
 
             fit_note = _check_portfolio_fit(ticker, fundamentals, portfolio)
@@ -565,7 +575,7 @@ News:
                 watchlist_adds.append({
                     "ticker": ticker,
                     "stage": "watching",
-                    "signal_reason": sig.signal_reason,
+                    "signal_reason": _watch_reason(classification, sig),
                     "theme": None,
                 })
                 continue
@@ -577,7 +587,7 @@ News:
                 watchlist_adds.append({
                     "ticker": ticker,
                     "stage": "watching",
-                    "signal_reason": sig.signal_reason,
+                    "signal_reason": _watch_reason(classification, sig),
                     "theme": None,
                 })
                 continue
@@ -592,7 +602,7 @@ News:
                 watchlist_adds.append({
                     "ticker": ticker,
                     "stage": "watching",
-                    "signal_reason": f"Nízká confidence — jen sledovat. {sig.signal_reason}",
+                    "signal_reason": _watch_reason(classification, sig),
                     "theme": fundamentals.get("sector"),
                 })
                 continue
@@ -604,7 +614,7 @@ News:
                 watchlist_adds.append({
                     "ticker": ticker,
                     "stage": "watching",
-                    "signal_reason": f"Momentum setup není dost silný pro nákup. {sig.signal_reason}",
+                    "signal_reason": _watch_reason(classification, sig),
                     "theme": fundamentals.get("sector"),
                 })
                 continue
@@ -658,7 +668,12 @@ News:
                 reserve_shares=reserve_shares,
             ))
 
-            watch_reason = classification.get("entry_rationale") or sig.signal_reason
+            watch_reason = (
+                classification.get("entry_rationale")
+                or classification.get("thesis")
+                or classification.get("watch_note")
+                or sig.signal_reason
+            )
             watchlist_adds.append({
                 "ticker": ticker,
                 "stage": "candidate",
@@ -743,6 +758,16 @@ def _parse_classification(text: str) -> Optional[dict]:
     except Exception:
         pass
     return None
+
+
+def _watch_reason(classification: Optional[dict], sig: SignalTicker) -> str:
+    """Meaningful watchlist reason — prefer the LLM's own narrative over the raw signal headline."""
+    if classification:
+        for key in ("watch_note", "thesis", "entry_rationale"):
+            note = (classification.get(key) or "").strip()
+            if note:
+                return note[:220]
+    return sig.signal_reason
 
 
 def _preview_llm_response(text: str, limit: int = 220) -> str:
