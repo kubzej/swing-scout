@@ -33,38 +33,38 @@ class ThesisEventResponse(BaseModel):
     id: str
     thesis_id: str
     user_id: str
-    position_id: Optional[str]
+    position_id: Optional[str] = None
     ticker: str
     kind: str
-    text: Optional[str]
-    payload: Any
-    status_before: Optional[str]
-    status_after: Optional[str]
+    text: Optional[str] = None
+    payload: Any = None
+    status_before: Optional[str] = None
+    status_after: Optional[str] = None
     created_at: datetime
 
 
 class ThesisResponse(BaseModel):
     id: str
-    position_id: Optional[str]
+    position_id: Optional[str] = None
     user_id: str
     ticker: str
     play_type: str
     status: str
     entry_thesis: str
-    entry_rationale: Optional[str]
-    invalidation_conditions: Optional[str]
-    profit_taking_plan: Optional[str]
-    monitoring_focus: Optional[str]
-    holding_horizon: Optional[str]
-    add_plan: Optional[str]
-    exit_plan: Optional[str]
-    source_recommendation_id: Optional[str]
-    last_thesis_check_at: Optional[datetime]
-    last_thesis_check_summary: Optional[str]
-    last_thesis_check_action_bias: Optional[str]
-    last_thesis_check_urgency: Optional[str]
-    last_user_override_at: Optional[datetime]
-    last_user_override_summary: Optional[str]
+    entry_rationale: Optional[str] = None
+    invalidation_conditions: Optional[str] = None
+    profit_taking_plan: Optional[str] = None
+    monitoring_focus: Optional[str] = None
+    holding_horizon: Optional[str] = None
+    add_plan: Optional[str] = None
+    exit_plan: Optional[str] = None
+    source_recommendation_id: Optional[str] = None
+    last_thesis_check_at: Optional[datetime] = None
+    last_thesis_check_summary: Optional[str] = None
+    last_thesis_check_action_bias: Optional[str] = None
+    last_thesis_check_urgency: Optional[str] = None
+    last_user_override_at: Optional[datetime] = None
+    last_user_override_summary: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     events: List[ThesisEventResponse] = []
