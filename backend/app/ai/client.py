@@ -29,7 +29,10 @@ def _temporal_context() -> str:
         parts.append(f"US burza (ET): {et:%Y-%m-%d %H:%M}.")
     except Exception:
         pass
-    parts.append("Cokoliv s dřívějším datem je minulost — neber to jako budoucí událost.")
+    parts.append(
+        "Události s datem před tímto časem jsou minulé, s pozdějším budoucí — "
+        "nevydávej je za dnešní ani za to, na co se zrovna čeká."
+    )
     return " ".join(parts)
 
 
