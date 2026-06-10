@@ -179,10 +179,12 @@ Pravidla pro exit podle typu hry:
 
 Pravidla pro nákup:
 - Signal není nákup. Nákup doporuč jen pokud je jasné proč právě teď otevřít pozici.
-- Pokud chybí konkrétní teze, catalyst, entry rationale nebo invalidace, vrať {"skip": true, "watch_note": "..."}.
+- Pole "action" rozhoduje: "buy" = otevřít pozici PRÁVĚ TEĎ, "wait" = teze drží, ale na vstup se ještě čeká.
+- Pokud teze závisí na nepotvrzené binární události (typicky earnings teprve dnes nebo zítra, PŘED zveřejněním výsledků), vrať action="wait" — vyplň thesis i watch_note, ale neotevírej pozici. Po potvrzení se akcie objeví v dalším běhu.
+- Pokud katalyzátor už proběhl (earnings beat dnes ráno a reakce trhu je vidět), action="buy" je v pořádku.
 - Velký denní pokles není sám o sobě dip-buy. Musí být jasné, proč pokles nerozbíjí tezi.
 - Velký denní růst není sám o sobě momentum-buy. Nesmí to být jen chasing po hot news.
-- Pokud je lepší akcii jen sledovat nebo počkat na další potvrzení, vrať {"skip": true, "watch_note": "..."}.
+- Pokud je lepší akcii jen sledovat nebo počkat na další potvrzení, vrať action="wait" (s tezí), nebo {"skip": true, "watch_note": "..."} pokud teze chybí úplně.
 
 KRITICKÉ:
 - Vrať POUZE jeden JSON objekt.
@@ -190,7 +192,7 @@ KRITICKÉ:
 - Buď velmi stručný. Neopakuj stejné informace mezi poli.
 
 Odpověz ve formátu JSON:
-{"play_type": "A|B|C", "confidence": 1-4, "thesis": "...", "invalidation_conditions": "...", "profit_taking_plan": "...", "holding_horizon": "...", "monitoring_focus": "...", "entry_rationale": "...", "watch_note": "..."}
+{"action": "buy|wait", "play_type": "A|B|C", "confidence": 1-4, "thesis": "...", "invalidation_conditions": "...", "profit_taking_plan": "...", "holding_horizon": "...", "monitoring_focus": "...", "entry_rationale": "...", "watch_note": "..."}
 
 Pokud akcie nesplňuje kritéria (meme, pink sheet, bez teze), odpověz: {"skip": true, "watch_note": "..."}
 
@@ -502,6 +504,7 @@ async def run_deep_filter_with_diagnostics(
         "held_skipped": 0,
         "invalid_stock_skipped": 0,
         "llm_skip": 0,
+        "wait_no_entry": 0,
         "low_confidence_skipped": 0,
         "exception_skipped": 0,
         "watchlist_adds": 0,
@@ -598,6 +601,21 @@ News:
 
             confidence = classification.get("confidence", 2)
             play_type = classification.get("play_type", "A")
+            action = (classification.get("action") or "buy").strip().lower()
+
+            if action == "wait":
+                # Teze drží, ale vstup se odkládá (typicky nepotvrzená binární událost
+                # jako earnings před výsledky). Patří na watchlist i s tezí, ne do doporučení.
+                diagnostics['wait_no_entry'] += 1
+                record_rejection('wait_no_entry', ticker)
+                log_event(logger, logging.INFO, 'stage2_ticker_skipped', ticker=ticker, reason='wait_no_entry')
+                watchlist_adds.append({
+                    "ticker": ticker,
+                    "stage": "candidate",
+                    "signal_reason": _watch_reason(classification, sig),
+                    "theme": fundamentals.get("sector"),
+                })
+                continue
 
             if confidence <= 1:
                 diagnostics['low_confidence_skipped'] += 1
